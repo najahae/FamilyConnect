@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Family Tree Graph</title>
+    <script src="https://unpkg.com/cytoscape/dist/cytoscape.min.js"></script>
+    <style>
+        html, body, #cy {
+          width: 100%;
+          height: 100%;
+          margin: 0;
+          background: #ecf5ff;
+          font-family: 'Segoe UI', sans-serif;
+        }
+        .modal {
+          display: none;
+          position: fixed;
+          z-index: 999;
+          left: 0;
+          top: 0;
+          width: 100%;
+          height: 100%;
+          background-color: rgba(0, 0, 0, 0.5);
+          backdrop-filter: blur(3px);
+        }
+        .modal-content {
+          background-color: #fff;
+          margin: 30% auto;
+          padding: 20px;
+          border-radius: 16px;
+          width: 85%;
+          max-width: 320px;
+          box-shadow: 0 8px 20px rgba(0, 0, 0, 0.3);
+          text-align: center;
+          animation: fadeIn 0.3s ease;
+        }
+        .modal-content h3 {
+          margin-top: 0;
+          color: #333;
+        }
+        .modal-content p, input, select {
+          margin: 8px 0;
+          font-size: 14px;
+          color: #555;
+        }
+        input, select {
+          width: 90%;
+          padding: 6px;
+          border: 1px solid #ccc;
+          border-radius: 6px;
+        }
+        .close-button {
+          color: #999;
+          float: right;
+          font-size: 24px;
+          font-weight: bold;
+          cursor: pointer;
+        }
+        .close-button:hover { color: #000; }
+        .button {
+          margin: 8px 0;
+          padding: 10px;
+          width: 100%;
+          border: none;
+          border-radius: 8px;
+          font-size: 14px;
+          cursor: pointer;
+        }
+        .edit-button { background-color: #4CAF50; color: white; }
+        .delete-button { background-color: #f44336; color: white; }
+        .cancel-button { background-color: #999; color: white; }
+        .save-button { background-color: #2196F3; color: white; }
+        @keyframes fadeIn {
+          from { transform: scale(0.95); opacity: 0; }
+          to { transform: scale(1); opacity: 1; }
+        }
+        select {
+            width: 90%;
+            padding: 8px;
+            margin: 6px 0;
+            font-size: 14px;
+            border: 1px solid #ccc;
+            border-radius: 6px;
+            background-color: #fff;
+            appearance: auto; /* ensures native dropdown UI */
+            z-index: 1000;
+        }
+
+    </style>
+</head>
+<body>
+
+<div id="cy"></div>
+
+<!-- 💬 Modal -->
+<div id="infoModal" class="modal">
+    <div class="modal-content">
+        <span class="close-button" onclick="closeModal()">&times;</span>
+        <h3 id="modal-name"></h3>
+        <p><strong>Nickname:</strong> <span id="modal-nickname"></span></p>
+        <p><strong>Birthdate:</strong> <span id="modal-birthdate"></span></p>
+        <div id="editSection"></div>
+    </div>
+</div>
+
+<!-- Custom Delete Modal -->
+<div id="deleteModal" class="modal">
+    <div class="modal-content">
+        <h3>Confirm Deletion</h3>
+        <p id="deleteText"></p>
+        <button class="button delete-button" onclick="confirmDelete()">Yes, Delete</button>
+        <button class="button cancel-button" onclick="closeDeleteModal()">Cancel</button>
+    </div>
+</div>
+
+
+<script>
+    let currentNodeData = null;
+    let isEditing = false;
+    let allMembers = [];
+
+    function closeModal() {
+      const modal = document.getElementById('infoModal');
+      if (modal) modal.style.display = 'none';
+
+      // Reset any inputs if necessary
+      if (currentNodeData) {
+        const nicknameInput = document.getElementById('modal-nickname');
+        const birthdateInput = document.getElementById('modal-birthdate');
+
+        if (nicknameInput && nicknameInput.tagName === 'INPUT') {
+          nicknameInput.replaceWith(Object.assign(document.createElement('span'), {
+            id: 'modal-nickname',
+            textContent: currentNodeData.nickname || '-'
+          }));
+        }
+
+        if (birthdateInput && birthdateInput.tagName === 'INPUT') {
+          birthdateInput.replaceWith(Object.assign(document.createElement('span'), {
+            id: 'modal-birthdate',
+            textContent: currentNodeData.birthDate || '-'
+          }));
+        }
+      }
+
+      isEditing = false;
+    }
+
+    function createButton(text, className, onClick) {
+      const btn = document.createElement('button');
+      btn.innerText = text;
+      btn.className = `button ${className}`;
+      btn.onclick = onClick;
+      return btn;
+    }
+
+    function enableEdit(data) {
+      if (isEditing) return;
+      isEditing = true;
+
+      const nicknameSpan = document.getElementById('modal-nickname');
+      const birthdateSpan = document.getElementById('modal-birthdate');
+
+      const nicknameInput = document.createElement('input');
+      nicknameInput.value = data.nickname || '';
+      nicknameInput.id = 'modal-nickname';
+      nicknameSpan.replaceWith(nicknameInput);
+
+      const birthdateInput = document.createElement('input');
+      birthdateInput.value = data.birthDate || '';
+      birthdateInput.id = 'modal-birthdate';
+      birthdateSpan.replaceWith(birthdateInput);
+
+      const editSection = document.getElementById('editSection');
+      editSection.innerHTML = '';
+      editSection.appendChild(createButton('Save', 'save-button', () => {
+        const updated = {
+          id: data.id,
+          nickname: nicknameInput.value,
+          birthDate: birthdateInput.value
+        };
+       FlutterChannel.postMessage(JSON.stringify({ type: 'updateMember', payload: updated }));
+        closeModal();
+      }));
+      editSection.appendChild(createButton('Cancel', 'cancel-button', () => {
+        isEditing = false;
+        showModal(currentNodeData);
+      }));
+    }
+
+    function showModal(data) {
+  const name = document.getElementById('modal-name');
+  const editSection = document.getElementById('editSection');
+
+  name.innerText = data.fullName || 'Unknown';
+  editSection.innerHTML = '';
+
+  // Force rebuild nickname and birthdate elements as span
+  const nicknameContainer = document.createElement('span');
+  nicknameContainer.id = 'modal-nickname';
+  nicknameContainer.textContent = data.nickname || '-';
+
+  const birthdateContainer = document.createElement('span');
+  birthdateContainer.id = 'modal-birthdate';
+  birthdateContainer.textContent = data.birthDate || '-';
+
+  // Replace any existing elements
+  const oldNickname = document.getElementById('modal-nickname');
+  const oldBirthdate = document.getElementById('modal-birthdate');
+  if (oldNickname) oldNickname.replaceWith(nicknameContainer);
+  if (oldBirthdate) oldBirthdate.replaceWith(birthdateContainer);
+
+  if (window.userRole === 'moderator') {
+    editSection.appendChild(createButton('Edit Info', 'edit-button', () => enableEdit(data)));
+    editSection.appendChild(createButton('Delete Member', 'delete-button', () => {
+      openDeleteModal(data.fullName, data.id);
+    }));
+  }
+
+  document.getElementById('infoModal').style.display = 'block';
+}
+
+    function openDeleteModal(name, memberId) {
+  const modal = document.getElementById('deleteModal');
+  const text = document.getElementById('deleteText');
+  text.innerText = `Are you sure you want to delete ${name}?`;
+
+  modal.dataset.memberId = memberId;
+  modal.style.display = 'block';
+}
+
+function closeDeleteModal() {
+  const modal = document.getElementById('deleteModal');
+  modal.style.display = 'none';
+  delete modal.dataset.memberId;
+}
+
+function confirmDelete() {
+  const modal = document.getElementById('deleteModal');
+  const memberId = modal.dataset.memberId;
+
+  if (memberId) {
+    FlutterChannel.postMessage(JSON.stringify({
+      type: 'deleteMember',
+      payload: { id: memberId }
+    }));
+  }
+
+  closeDeleteModal();
+  closeModal(); // also close the info modal
+}
+
+    function renderFamilyTree(data) {
+      allMembers = data.filter(el => el.data && el.group === 'nodes');
+
+      const cy = cytoscape({
+        container: document.getElementById('cy'),
+        elements: data,
+        style: [
+          {
+            selector: 'node',
+            style: {
+              'label': 'data(label)',
+              'background-color': 'data(color)',
+              'color': '#fff',
+              'text-valign': 'center',
+              'text-halign': 'center',
+              'font-size': '12px',
+              'width': 50,
+              'height': 50,
+              'text-wrap': 'wrap'
+            }
+          },
+          {
+            selector: 'edge',
+            style: {
+              'width': 2,
+              'line-color': '#888',
+              'target-arrow-color': '#888',
+              'target-arrow-shape': 'triangle',
+              'curve-style': 'bezier'
+            }
+          },
+          {
+            selector: 'edge[relationship = "spouse"]',
+            style: {
+              'line-style': 'dashed',
+              'line-color': '#ff9800',
+              'target-arrow-shape': 'none',
+              'width': 2,
+              'curve-style': 'bezier'
+            }
+          }
+        ],
+        layout: { name: 'cose', animate: true }
+      });
+
+      cy.on('tap', 'node', function(evt) {
+        currentNodeData = evt.target.data();
+        isEditing = false;
+        showModal(currentNodeData);
+      });
+    }
+
+    window.addEventListener("message", (event) => {
+      try {
+        const jsonData = JSON.parse(event.data);
+        if (Array.isArray(jsonData)) renderFamilyTree(jsonData);
+      } catch (err) {
+        console.error("Failed to parse incoming message:", err);
+      }
+    });
+
+    window.setUserRole = function(role) {
+      window.userRole = role;
+    };
+</script>
+
+</body>
+</html>

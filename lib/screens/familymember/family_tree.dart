@@ -1,35 +1,78 @@
+import 'dart:convert';
+import 'package:familytree/screens/moderator/edit_members.dart';
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:graphview/GraphView.dart';
+import 'package:webview_flutter/webview_flutter.dart';
 import 'family_member_model.dart';
 
 class FamilyTreePage extends StatefulWidget {
   final String familyID;
+  final String role;
 
-  const FamilyTreePage({super.key, required this.familyID});
+  const FamilyTreePage({super.key, required this.familyID, this.role = 'family_member'});
 
   @override
   State<FamilyTreePage> createState() => _FamilyTreePageState();
 }
 
 class _FamilyTreePageState extends State<FamilyTreePage> {
-  final Graph graph = Graph();
-  BuchheimWalkerConfiguration builder = BuchheimWalkerConfiguration();
-
+  late final WebViewController _controller;
   List<FamilyMember> members = [];
   bool isLoading = true;
-  Map<String, FamilyMember> memberMap = {};
 
-  TransformationController _transformationController = TransformationController();
-  double _scaleFactor = 1.0;
+  // Filters
+  String searchTerm = '';
+  String selectedGender = 'All';
 
   @override
   void initState() {
     super.initState();
-    fetchFamilyMembers();
+    _controller = WebViewController()
+      ..setJavaScriptMode(JavaScriptMode.unrestricted)
+      ..addJavaScriptChannel('FlutterChannel', onMessageReceived: handleJSMessage)
+      ..loadFlutterAsset('assets/html/family_tree.html')
+      ..setNavigationDelegate(NavigationDelegate(
+        onPageFinished: (_) => sendFamilyTreeData(),
+      ));
+    fetchMembers();
   }
 
-  Future<void> fetchFamilyMembers() async {
+  void handleJSMessage(JavaScriptMessage message) async {
+    try {
+      final decoded = jsonDecode(message.message);
+      final type = decoded['type'];
+      final payload = decoded['payload'];
+
+      if (type == 'updateMember') {
+        await FirebaseFirestore.instance
+            .collection('families')
+            .doc(widget.familyID)
+            .collection('family_members')
+            .doc(payload['id'])
+            .update({
+          'nickname': payload['nickname'],
+          'birthDate': payload['birthDate'],
+        });
+        await fetchMembers();
+        sendFamilyTreeData();
+      } else if (type == 'deleteMember') {
+        await FirebaseFirestore.instance
+            .collection('families')
+            .doc(widget.familyID)
+            .collection('family_members')
+            .doc(payload['id'])
+            .delete();
+        await fetchMembers();
+        sendFamilyTreeData();
+      } else if (type == 'editParents') {
+        print("Edit parents requested for: ${payload['id']}");
+      }
+    } catch (e) {
+      print('Error handling JS message: $e');
+    }
+  }
+
+  Future<void> fetchMembers() async {
     try {
       final snapshot = await FirebaseFirestore.instance
           .collection('families')
@@ -41,10 +84,6 @@ class _FamilyTreePageState extends State<FamilyTreePage> {
           .map((doc) => FamilyMember.fromMap(doc.id, doc.data()))
           .toList();
 
-      memberMap = {for (var m in members) m.id: m};
-
-      buildGraph();
-
       setState(() => isLoading = false);
     } catch (e) {
       print('Error fetching family members: $e');
@@ -52,83 +91,87 @@ class _FamilyTreePageState extends State<FamilyTreePage> {
     }
   }
 
-  void buildGraph() {
-    graph.nodes.clear();
-    graph.edges.clear();
+  void sendFamilyTreeData() {
+    if (members.isEmpty) return;
 
-    Map<String, Node> nodeMap = {};
+    final filtered = members.where((m) {
+      final matchesSearch = m.fullName.toLowerCase().contains(searchTerm) ||
+          (m.nickname?.toLowerCase().contains(searchTerm) ?? false);
+      final matchesGender = selectedGender == 'All' || m.gender.toLowerCase() == selectedGender.toLowerCase();
+      return matchesSearch && matchesGender;
+    }).toList();
+
+    final elements = toCytoscapeElements(filtered);
+    final jsonText = jsonEncode(elements);
+
+    _controller.runJavaScript("window.postMessage(`$jsonText`, '*');");
+    _controller.runJavaScript("window.setUserRole('${widget.role}');");
+  }
+
+  String getInitials(String name) {
+    final parts = name.trim().split(' ');
+    if (parts.length >= 2) {
+      return '${parts[0][0]}${parts[1][0]}'.toUpperCase();
+    } else {
+      return name.substring(0, 2).toUpperCase();
+    }
+  }
+
+  List<Map<String, dynamic>> toCytoscapeElements(List<FamilyMember> members) {
+    final elements = <Map<String, dynamic>>[];
+    final memberMap = {for (var m in members) m.id: m};
 
     for (var member in members) {
-      nodeMap[member.id] = Node.Id(member.id);
+      elements.add({
+        'data': {
+          'id': member.id,
+          'label': getInitials(member.fullName),
+          'fullName': member.fullName,
+          'nickname': member.nickname ?? '',
+          'birthDate': member.birthDate ?? '',
+          'color': member.gender.toLowerCase() == 'male'
+              ? '#4a90e2'
+              : '#f06292',
+        }
+      });
     }
 
     for (var member in members) {
-      if (member.fatherId != null && nodeMap.containsKey(member.fatherId)) {
-        graph.addEdge(nodeMap[member.fatherId]!, nodeMap[member.id]!);
+      if (member.fatherId != null && memberMap.containsKey(member.fatherId)) {
+        elements.add({
+          'data': {
+            'source': member.fatherId,
+            'target': member.id,
+          }
+        });
       }
-      if (member.motherId != null && nodeMap.containsKey(member.motherId)) {
-        graph.addEdge(nodeMap[member.motherId]!, nodeMap[member.id]!);
+      if (member.motherId != null && memberMap.containsKey(member.motherId)) {
+        elements.add({
+          'data': {
+            'source': member.motherId,
+            'target': member.id,
+          }
+        });
+      }
+      if (member.spouseId != null && memberMap.containsKey(member.spouseId)) {
+        if (!elements.any((e) =>
+        e['data']?['relationship'] == 'spouse' &&
+            ((e['data']?['source'] == member.id &&
+                e['data']?['target'] == member.spouseId) ||
+                (e['data']?['source'] == member.spouseId &&
+                    e['data']?['target'] == member.id)))) {
+          elements.add({
+            'data': {
+              'source': member.id,
+              'target': member.spouseId,
+              'relationship': 'spouse',
+            }
+          });
+        }
       }
     }
 
-    builder
-      ..siblingSeparation = (60)
-      ..levelSeparation = (80)
-      ..subtreeSeparation = (50)
-      ..orientation = BuchheimWalkerConfiguration.ORIENTATION_TOP_BOTTOM;
-  }
-
-  Widget nodeWidget(String memberId) {
-    final member = memberMap[memberId]!;
-    final color = member.gender.toLowerCase() == 'male'
-        ? Colors.blue
-        : Colors.pink;
-
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        CircleAvatar(
-          radius: 25,
-          backgroundColor: color,
-          child: Icon(Icons.person, color: Colors.white),
-        ),
-        const SizedBox(height: 4),
-        SizedBox(
-          width: 80,
-          child: Text(
-            member.fullName,
-            textAlign: TextAlign.center,
-            maxLines: 2,
-            overflow: TextOverflow.ellipsis,
-            style: const TextStyle(
-              fontSize: 10,
-              fontWeight: FontWeight.bold,
-            ),
-          ),
-        ),
-      ],
-    );
-  }
-
-  void zoomIn() {
-    setState(() {
-      _scaleFactor *= 1.2;
-      _transformationController.value = Matrix4.identity()..scale(_scaleFactor);
-    });
-  }
-
-  void zoomOut() {
-    setState(() {
-      _scaleFactor /= 1.2;
-      _transformationController.value = Matrix4.identity()..scale(_scaleFactor);
-    });
-  }
-
-  void resetZoom() {
-    setState(() {
-      _scaleFactor = 1.0;
-      _transformationController.value = Matrix4.identity();
-    });
+    return elements;
   }
 
   @override
@@ -150,52 +193,61 @@ class _FamilyTreePageState extends State<FamilyTreePage> {
           ),
         ),
       ),
+      floatingActionButton: (widget.role == 'moderator')
+          ? FloatingActionButton(
+        onPressed: () {
+          Navigator.push(
+            context,
+            MaterialPageRoute(
+              builder: (context) => EditMembersPage(familyId: widget.familyID),
+            ),
+          );
+        },
+        child: const Icon(Icons.list),
+        tooltip: 'Edit Members',
+      )
+          : null,
       body: isLoading
           ? const Center(child: CircularProgressIndicator())
-          : members.isEmpty
-          ? const Center(child: Text('No family members found.'))
-          : Stack(
+          : Column(
         children: [
-          InteractiveViewer(
-            transformationController: _transformationController,
-            constrained: false,
-            boundaryMargin: const EdgeInsets.all(100),
-            minScale: 0.01,
-            maxScale: 5.0,
-            child: GraphView(
-              graph: graph,
-              algorithm: BuchheimWalkerAlgorithm(builder, TreeEdgeRenderer(builder)),
-              paint: Paint()
-                ..color = Colors.black
-                ..strokeWidth = 1
-                ..style = PaintingStyle.stroke,
-              builder: (Node node) {
-                final memberId = node.key!.value as String;
-                return nodeWidget(memberId);
-              },
-            ),
-          ),
-          Positioned(
-            bottom: 20,
-            right: 20,
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 10, 12, 0),
             child: Column(
               children: [
-                FloatingActionButton(
-                  heroTag: "zoomIn",
-                  mini: true,
-                  onPressed: zoomIn,
-                  child: const Icon(Icons.zoom_in),
+                TextField(
+                  onChanged: (val) {
+                    setState(() => searchTerm = val.toLowerCase());
+                    sendFamilyTreeData();
+                  },
+                  decoration: InputDecoration(
+                    hintText: 'Search name or nickname',
+                    prefixIcon: Icon(Icons.search),
+                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+                  ),
                 ),
                 const SizedBox(height: 10),
-                FloatingActionButton(
-                  heroTag: "zoomOut",
-                  mini: true,
-                  onPressed: zoomOut,
-                  child: const Icon(Icons.zoom_out),
-                ),
+                Row(
+                  children: [
+                    const Text('Gender:'),
+                    const SizedBox(width: 10),
+                    DropdownButton<String>(
+                      value: selectedGender,
+                      onChanged: (val) {
+                        setState(() => selectedGender = val ?? 'All');
+                        sendFamilyTreeData();
+                      },
+                      items: ['All', 'Male', 'Female'].map((gender) {
+                        return DropdownMenuItem(value: gender, child: Text(gender));
+                      }).toList(),
+                    ),
+                  ],
+                )
               ],
             ),
-          )
+          ),
+          const SizedBox(height: 10),
+          Expanded(child: WebViewWidget(controller: _controller)),
         ],
       ),
     );

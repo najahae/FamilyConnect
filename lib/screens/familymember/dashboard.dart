@@ -6,8 +6,20 @@ import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import '../familymember/maps.dart';
+import '../familymember/notifications.dart';
 
 class FamilyMemberDashboard extends StatefulWidget {
+  final String userId;
+  final String familyId;
+  final Map<String, dynamic> userData;
+
+  const FamilyMemberDashboard({
+    Key? key,
+    required this.userId,
+    required this.familyId,
+    required this.userData,
+  }) : super(key: key);
+
   @override
   _FamilyMemberDashboardState createState() => _FamilyMemberDashboardState();
 }
@@ -258,8 +270,18 @@ class _FamilyMemberDashboardState extends State<FamilyMemberDashboard> {
           IconButton(
             icon: Icon(Icons.notifications),
             onPressed: () {
-              ScaffoldMessenger.of(context).showSnackBar(
-                SnackBar(content: Text("Notifications clicked")),
+              if (familyID == null) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(content: Text("Family ID not loaded yet!")),
+                );
+                return;
+              }
+
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => NotificationsPage(familyID: familyID!),
+                ),
               );
             },
           ),

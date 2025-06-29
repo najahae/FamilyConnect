@@ -1,30 +1,31 @@
-import 'dart:convert';
-import 'dart:io';
-import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'dart:io';
 import 'package:image_picker/image_picker.dart';
+import 'package:firebase_storage/firebase_storage.dart';
 
-class ModeratorProfile extends StatefulWidget {
-  final String familyID;
+class ModeratorProfilePage extends StatefulWidget {
+  final String familyId;
 
-  ModeratorProfile({required this.familyID});
+  const ModeratorProfilePage({Key? key, required this.familyId}) : super(key: key);
 
   @override
-  _ModeratorProfileState createState() => _ModeratorProfileState();
+  _ModeratorProfilePageState createState() => _ModeratorProfilePageState();
 }
 
-class _ModeratorProfileState extends State<ModeratorProfile> {
+class _ModeratorProfilePageState extends State<ModeratorProfilePage> {
   final FirebaseAuth _auth = FirebaseAuth.instance;
   final FirebaseFirestore _firestore = FirebaseFirestore.instance;
 
-  final TextEditingController _usernameController = TextEditingController();
-  final TextEditingController _emailController = TextEditingController();
+  bool showCurrent = false;
+  bool showNew = false;
+  bool showConfirm = false;
+  bool isLoading = true;
 
-  String? _profileImageBase64;
-  String? _originalEmail;
-  bool _isLoading = true;
-  String? _errorMessage;
+  File? _imageFile;
+  String? _imageUrl;
+  String email = '';
 
   @override
   void initState() {
@@ -33,151 +34,260 @@ class _ModeratorProfileState extends State<ModeratorProfile> {
   }
 
   Future<void> _loadModeratorData() async {
-    User? user = _auth.currentUser;
-    if (user != null) {
-      setState(() {
-        _emailController.text = user.email ?? '';
-        _originalEmail = user.email;
-      });
+    final uid = _auth.currentUser?.uid;
+    if (uid != null) {
+      final doc = await _firestore
+          .collection('families')
+          .doc(widget.familyId)
+          .collection('moderators')
+          .doc(uid)
+          .get();
 
-      try {
-        final doc = await _firestore
-            .collection('families')
-            .doc(widget.familyID)
-            .collection('moderators')
-            .doc(user.uid)
-            .get();
-
-        if (doc.exists) {
-          final data = doc.data()!;
-          _usernameController.text = data['username'] ?? '';
-          _profileImageBase64 = data['profileImage'];
-        }
-      } catch (e) {
-        _errorMessage = "Error loading profile: ${e.toString()}";
+      if (doc.exists) {
+        setState(() {
+          email = doc['email'] ?? '';
+          isLoading = false;
+        });
       }
-
-      setState(() => _isLoading = false);
+      setState(() {
+        email = doc['email'] ?? '';
+        _imageUrl = doc['profileImageUrl']; // Get profile picture
+        isLoading = false;
+      });
     }
   }
 
-  Future<void> _updateProfile() async {
-    User? user = _auth.currentUser;
-    if (user == null) return;
-
+  Future<bool> reauthenticateUser(String email, String currentPassword) async {
     try {
-      if (_emailController.text != _originalEmail) {
-        await user.updateEmail(_emailController.text.trim());
-      }
+      AuthCredential credential = EmailAuthProvider.credential(
+        email: email,
+        password: currentPassword,
+      );
+      await _auth.currentUser?.reauthenticateWithCredential(credential);
+      return true;
+    } catch (e) {
+      print('Reauthentication failed: $e');
+      return false;
+    }
+  }
 
-      await _firestore
-          .collection('families')
-          .doc(widget.familyID)
-          .collection('moderators')
-          .doc(user.uid)
-          .update({
-        'username': _usernameController.text.trim(),
-        'profileImage': _profileImageBase64,
-      });
+  Future<void> _pickAndUploadImage() async {
+    final picker = ImagePicker();
+    final picked = await picker.pickImage(source: ImageSource.gallery);
+    if (picked == null) return;
 
+    final file = File(picked.path);
+    final uid = _auth.currentUser!.uid;
+
+    final storageRef = FirebaseStorage.instance
+        .ref()
+        .child('moderators/$uid/profile.jpg');
+
+    await storageRef.putFile(file);
+    final downloadUrl = await storageRef.getDownloadURL();
+
+    await _firestore
+        .collection('families')
+        .doc(widget.familyId)
+        .collection('moderators')
+        .doc(uid)
+        .update({'profileImageUrl': downloadUrl});
+
+    setState(() {
+      _imageFile = file;
+      _imageUrl = downloadUrl;
+    });
+  }
+
+  Future<void> updatePassword(String newPassword) async {
+    try {
+      await _auth.currentUser?.updatePassword(newPassword);
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text("Profile updated successfully")),
+        SnackBar(content: Text("Password updated successfully!")),
       );
     } catch (e) {
-      setState(() {
-        _errorMessage = "Failed to update profile: ${e.toString()}";
-      });
+      print('Password update failed: $e');
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text("Failed to update password")),
+      );
     }
   }
 
-  Future<void> _changePassword() async {
-    TextEditingController newPasswordController = TextEditingController();
+  void _showPasswordUpdateDialog() {
+    final currentPasswordController = TextEditingController();
+    final newPasswordController = TextEditingController();
+    final confirmPasswordController = TextEditingController();
 
-    await showDialog(
+    showDialog(
       context: context,
-      builder: (ctx) => AlertDialog(
-        title: Text("Change Password"),
-        content: TextField(
-          controller: newPasswordController,
-          obscureText: true,
-          decoration: InputDecoration(labelText: "New Password"),
+      builder: (context) => AlertDialog(
+        title: Text('Update Password'),
+        content: StatefulBuilder(
+          builder: (context, setState) => Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: currentPasswordController,
+                obscureText: !showCurrent,
+                decoration: InputDecoration(
+                  labelText: 'Current Password',
+                  suffixIcon: IconButton(
+                    icon: Icon(showCurrent ? Icons.visibility : Icons.visibility_off),
+                    onPressed: () => setState(() => showCurrent = !showCurrent),
+                  ),
+                ),
+              ),
+              TextField(
+                controller: newPasswordController,
+                obscureText: !showNew,
+                decoration: InputDecoration(
+                  labelText: 'New Password',
+                  suffixIcon: IconButton(
+                    icon: Icon(showNew ? Icons.visibility : Icons.visibility_off),
+                    onPressed: () => setState(() => showNew = !showNew),
+                  ),
+                ),
+              ),
+              TextField(
+                controller: confirmPasswordController,
+                obscureText: !showConfirm,
+                decoration: InputDecoration(
+                  labelText: 'Confirm New Password',
+                  suffixIcon: IconButton(
+                    icon: Icon(showConfirm ? Icons.visibility : Icons.visibility_off),
+                    onPressed: () => setState(() => showConfirm = !showConfirm),
+                  ),
+                ),
+              ),
+            ],
+          ),
         ),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx), child: Text("Cancel")),
-          TextButton(
+          TextButton(onPressed: () => Navigator.pop(context), child: Text('Cancel')),
+          ElevatedButton(
             onPressed: () async {
-              try {
-                await _auth.currentUser?.updatePassword(newPasswordController.text.trim());
-                Navigator.pop(ctx);
-                ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Password updated")));
-              } catch (e) {
-                Navigator.pop(ctx);
-                ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Error: ${e.toString()}")));
+              final current = currentPasswordController.text.trim();
+              final newPass = newPasswordController.text.trim();
+              final confirm = confirmPasswordController.text.trim();
+
+              String? error;
+              if (newPass != confirm) {
+                error = "Passwords do not match.";
+              } else if (newPass.length < 6) {
+                error = "Password must be at least 6 characters long.";
+              } else if (!RegExp(r'[A-Z]').hasMatch(newPass)) {
+                error = "Password must contain at least one uppercase letter.";
+              } else if (!RegExp(r'[0-9]').hasMatch(newPass)) {
+                error = "Password must contain at least one number.";
+              } else if (!RegExp(r'[_!@#\$&*~]').hasMatch(newPass)) {
+                error = "Password must contain at least one special character (_!@#\$&*~)";
+              }
+
+              if (error != null) {
+                ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(error)));
+                return;
+              }
+
+              final userEmail = _auth.currentUser?.email;
+              if (userEmail == null) {
+                ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("User not signed in")));
+                return;
+              }
+
+              final success = await reauthenticateUser(userEmail, current);
+              if (success) {
+                await updatePassword(newPass);
+                Navigator.pop(context);
+              } else {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(content: Text("Wrong current password.")),
+                );
               }
             },
-            child: Text("Change"),
+            child: Text('Update'),
           ),
         ],
       ),
     );
   }
 
-  Future<void> _pickImage(bool fromCamera) async {
-    final picker = ImagePicker();
-    final pickedFile = await picker.pickImage(
-        source: fromCamera ? ImageSource.camera : ImageSource.gallery);
+  void _deleteAccount() async {
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text('Delete Account'),
+        content: Text('Are you sure you want to delete your account? This action cannot be undone.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: Text('Cancel')),
+          ElevatedButton(onPressed: () => Navigator.pop(context, true), child: Text('Delete')),
+        ],
+      ),
+    );
 
-    if (pickedFile != null) {
-      final bytes = await File(pickedFile.path).readAsBytes();
-      setState(() {
-        _profileImageBase64 = base64Encode(bytes);
-      });
+    if (confirm == true) {
+      final user = _auth.currentUser;
+      if (user != null) {
+        try {
+          await _firestore
+              .collection('families')
+              .doc(widget.familyId)
+              .collection('moderators')
+              .doc(user.uid)
+              .delete();
+
+          await user.delete();
+
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(content: Text('Account deleted successfully')),
+            );
+            Navigator.of(context).pop();
+          }
+        } catch (e) {
+          print("Error deleting moderator: $e");
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text("Failed to delete account.")),
+          );
+        }
+      }
     }
   }
 
-  Widget _buildProfileImage() {
-    return GestureDetector(
-      onTap: () {
-        showModalBottomSheet(
-          context: context,
-          builder: (ctx) => Wrap(
-            children: [
-              ListTile(
-                leading: Icon(Icons.photo),
-                title: Text("Gallery"),
-                onTap: () {
-                  Navigator.pop(ctx);
-                  _pickImage(false);
-                },
-              ),
-              ListTile(
-                leading: Icon(Icons.camera_alt),
-                title: Text("Camera"),
-                onTap: () {
-                  Navigator.pop(ctx);
-                  _pickImage(true);
-                },
-              ),
-            ],
-          ),
-        );
-      },
-      child: CircleAvatar(
-        radius: 50,
-        backgroundColor: Colors.brown[200],
-        backgroundImage: _profileImageBase64 != null
-            ? MemoryImage(base64Decode(_profileImageBase64!))
-            : null,
-        child: _profileImageBase64 == null
-            ? Icon(Icons.person, size: 50, color: Colors.white)
-            : null,
-      ),
+  Widget _buildInfoTile(IconData icon, String label, String value, VoidCallback onTap) {
+    return ListTile(
+      leading: Icon(icon),
+      title: Text(label),
+      subtitle: Text(value),
+      trailing: Icon(Icons.arrow_forward_ios),
+      onTap: onTap,
     );
   }
 
   @override
   Widget build(BuildContext context) {
-    if (_isLoading) return Scaffold(body: Center(child: CircularProgressIndicator()));
+    if (isLoading) {
+      return Scaffold(
+        appBar: PreferredSize(
+          preferredSize: Size.fromHeight(60),
+          child: ClipRRect(
+            borderRadius: BorderRadius.only(
+              bottomLeft: Radius.circular(25),
+              bottomRight: Radius.circular(25),
+            ),
+            child: AppBar(
+              backgroundColor: Colors.green[200],
+              centerTitle: true,
+              automaticallyImplyLeading: false,
+              title: Text(
+                "Profile",
+                style: TextStyle(fontWeight: FontWeight.bold),
+              ),
+            ),
+          ),
+        ),
+        body: Center(child: CircularProgressIndicator()),
+      );
+    }
 
     return Scaffold(
       appBar: PreferredSize(
@@ -199,62 +309,45 @@ class _ModeratorProfileState extends State<ModeratorProfile> {
         ),
       ),
       body: SingleChildScrollView(
-        padding: EdgeInsets.all(20),
+        padding: const EdgeInsets.all(16),
         child: Column(
           children: [
-            _buildProfileImage(),
-            SizedBox(height: 20),
-            _buildTextField(_usernameController, "Username"),
-            _buildTextField(_emailController, "Email"),
-            SizedBox(height: 10),
-            ElevatedButton(
-              onPressed: _updateProfile,
-              style: ElevatedButton.styleFrom(
-                backgroundColor: Colors.brown,
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                minimumSize: Size(double.infinity, 50),
-              ),
-              child: Text("Save Changes", style: TextStyle(color: Colors.white)),
-            ),
-            SizedBox(height: 10),
-            ElevatedButton(
-              onPressed: _changePassword,
-              style: ElevatedButton.styleFrom(
-                backgroundColor: Colors.brown,
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                minimumSize: Size(double.infinity, 50),
-              ),
-              child: Text("Change Password", style: TextStyle(color: Colors.white)),
-            ),
-            if (_errorMessage != null)
-              Padding(
-                padding: const EdgeInsets.all(8.0),
-                child: Text(_errorMessage!, style: TextStyle(color: Colors.red)),
-              )
-          ],
+          GestureDetector(
+          onTap: _pickAndUploadImage,
+          child: CircleAvatar(
+            radius: 50,
+            backgroundImage: _imageUrl != null
+                ? NetworkImage(_imageUrl!)
+                : null,
+            child: _imageUrl == null
+                ? Icon(Icons.person, size: 60)
+                : null,
+          ),
         ),
-      ),
-    );
-  }
+          SizedBox(height: 8),
+          TextButton(
+            onPressed: _pickAndUploadImage,
+            child: Text("Change Profile Picture"),
+          ),
+            SizedBox(height: 8),
+            Text(email, style: TextStyle(color: Colors.grey[700])),
+            _buildInfoTile(Icons.lock, 'Password', '************', _showPasswordUpdateDialog),
 
-  Widget _buildTextField(TextEditingController controller, String label) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 10),
-      child: TextField(
-        controller: controller,
-        decoration: InputDecoration(
-          labelText: label,
-          border: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(12),
-          ),
-          enabledBorder: OutlineInputBorder(
-            borderSide: BorderSide(color: Colors.grey), // grey when not focused
-            borderRadius: BorderRadius.circular(12),
-          ),
-          focusedBorder: OutlineInputBorder(
-            borderSide: BorderSide(color: Colors.brown, width: 2), // brown when focused
-            borderRadius: BorderRadius.circular(12),
-          ),
+            SizedBox(height: 20),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: Text('Account', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+            ),
+            Divider(),
+
+            Align(
+              alignment: Alignment.centerLeft,
+              child: TextButton(
+                onPressed: _deleteAccount,
+                child: Text('Delete Account', style: TextStyle(color: Colors.red)),
+              ),
+            ),
+          ],
         ),
       ),
     );

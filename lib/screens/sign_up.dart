@@ -4,6 +4,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:geolocator/geolocator.dart';
+import 'package:firebase_messaging/firebase_messaging.dart';
 
 
 class SignUpScreen extends StatefulWidget {
@@ -14,13 +15,19 @@ class SignUpScreen extends StatefulWidget {
 class _SignUpScreenState extends State<SignUpScreen> {
   final TextEditingController _familyIdController = TextEditingController();
   final TextEditingController _fullNameController = TextEditingController();
-  String? _selectedGender;
+  final TextEditingController _nicknameController = TextEditingController();
   final TextEditingController _birthDateController = TextEditingController();
   final TextEditingController _fatherIdController = TextEditingController();
   final TextEditingController _motherIdController = TextEditingController();
   final TextEditingController _emailController = TextEditingController();
   final TextEditingController _passwordController = TextEditingController();
   final TextEditingController _confirmPasswordController = TextEditingController();
+
+  String? _selectedGender;
+  String? _selectedSpouseId;
+  String? _familyID;
+  String? _errorMessage;
+  String _userType = "Moderator";
 
   LatLng? _pickedLocation;
   CameraPosition? _initialCameraPosition;
@@ -30,16 +37,13 @@ class _SignUpScreenState extends State<SignUpScreen> {
   bool _isFamilyIdValid = false;
   bool _obscurePassword = true;
   bool _obscureConfirmPassword = true;
-  bool isInLaw = false;
-
-  String? _familyID;
-  String? _errorMessage;
-  String _userType = "Moderator";
+  bool _hasSpouse = false;
 
   final FirebaseAuth _auth = FirebaseAuth.instance;
   final FirebaseFirestore _firestore = FirebaseFirestore.instance;
 
   List<Map<String, String>> _members = [];
+  List<Map<String, dynamic>> _availableSpouses = [];
 
   @override
   void initState() {
@@ -118,6 +122,24 @@ class _SignUpScreenState extends State<SignUpScreen> {
         SnackBar(content: Text("Family ID not found!")),
       );
     }
+  }
+
+  Future<void> _loadSpouseOptions(String familyId, String selectedGender) async {
+    final snapshot = await FirebaseFirestore.instance
+        .collection('families')
+        .doc(familyId)
+        .collection('family_members')
+        .get();
+
+    setState(() {
+      _availableSpouses = snapshot.docs
+          .where((doc) => (doc.data()['gender'] ?? '') != selectedGender)
+          .map((doc) => {
+        'id': doc.id,
+        'name': doc.data()['fullName'] ?? '[Unnamed]',
+      })
+          .toList();
+    });
   }
 
   void _showFamilyIdInfo() {
@@ -218,6 +240,7 @@ class _SignUpScreenState extends State<SignUpScreen> {
     String password = _passwordController.text.trim();
     String confirmPassword = _confirmPasswordController.text.trim();
     String fullName = _fullNameController.text.trim();
+    String nickname = _nicknameController.text.trim();
     String gender = _selectedGender ?? '';
     String fatherId = _fatherIdController.text.trim();
     String motherId = _motherIdController.text.trim();
@@ -309,11 +332,12 @@ class _SignUpScreenState extends State<SignUpScreen> {
 
         userData.addAll({
           'fullName': fullName,
+          'nickname': nickname,
           'gender': gender,
+          'spouseId': _hasSpouse ? _selectedSpouseId : null,
           'birthDate': birthDate,
           'fatherId': fatherId.isNotEmpty ? fatherId : null,
           'motherId': motherId.isNotEmpty ? motherId : null,
-          'isInLaw': isInLaw,
         });
 
         if (_pickedLocation != null) {
@@ -335,6 +359,21 @@ class _SignUpScreenState extends State<SignUpScreen> {
           .collection(collection)
           .doc(userCredential.user!.uid)
           .set(userData);
+
+      // After saving to Firestore
+      FirebaseMessaging messaging = FirebaseMessaging.instance;
+      String? token = await messaging.getToken();
+      if (token != null) {
+        await _firestore
+            .collection('families')
+            .doc(familyID)
+            .collection(collection)
+            .doc(userCredential.user!.uid)
+            .update({
+          'fcmToken': token,
+        });
+      }
+
 
       Navigator.pushReplacement(
         context,
@@ -454,6 +493,7 @@ class _SignUpScreenState extends State<SignUpScreen> {
                       if (_isLoading) CircularProgressIndicator(),
                       if (_isFamilyIdValid) ...[
                       _buildTextField(_fullNameController, "Full Name"),
+                        _buildTextField(_nicknameController, "Nickname (Optional)"),
                       Padding(
                         padding: const EdgeInsets.only(bottom: 10),
                         child: DropdownButtonFormField<String>(
@@ -482,32 +522,41 @@ class _SignUpScreenState extends State<SignUpScreen> {
                           ),
                         ),
                       ),
-                        Padding(
-                          padding: const EdgeInsets.only(bottom: 10),
-                          child: DropdownButtonFormField<bool>(
-                            value: isInLaw,
+                        Row(
+                          children: [
+                            Checkbox(
+                              value: _hasSpouse,
+                              onChanged: (value) {
+                                setState(() {
+                                  _hasSpouse = value ?? false;
+                                });
+                                if (_hasSpouse) {
+                                  // Call this with the selected gender and familyId (must be filled)
+                                  _loadSpouseOptions(_familyIdController.text.trim(), _selectedGender ?? '');
+                                }
+                              },
+                            ),
+                            const Text("Do you have a spouse?"),
+                          ],
+                        ),
+
+                        if (_hasSpouse)
+                          DropdownButtonFormField<String>(
+                            value: _selectedSpouseId,
+                            decoration: const InputDecoration(labelText: 'Select Spouse'),
+                            items: _availableSpouses
+                                .map((spouse) => DropdownMenuItem<String>(
+                              value: spouse['id'],
+                              child: Text(spouse['name']),
+                            ))
+                                .toList(),
                             onChanged: (value) {
                               setState(() {
-                                isInLaw = value!;
+                                _selectedSpouseId = value;
                               });
                             },
-                            items: const [
-                              DropdownMenuItem(value: false, child: Text("No")),
-                              DropdownMenuItem(value: true, child: Text("Yes")),
-                            ],
-                            decoration: InputDecoration(
-                              labelText: "Is this person an in-law?",
-                              border: OutlineInputBorder(borderRadius: BorderRadius.circular(20)),
-                              focusedBorder: OutlineInputBorder(
-                                borderSide: BorderSide(color: Colors.brown, width: 2),
-                                borderRadius: BorderRadius.circular(20),
-                              ),
-                              floatingLabelStyle: TextStyle(
-                                color: Colors.black,
-                              ),
-                            ),
                           ),
-                        ),
+
                         Padding(
                         padding: const EdgeInsets.only(bottom: 10),
                         child: DropdownButtonFormField<String>(

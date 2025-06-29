@@ -2,52 +2,41 @@ import 'package:familytree/screens/welcome_screen.dart';
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:familytree/screens/familymember/family_tree.dart';
+import 'package:familytree/screens/familymember/event.dart';
 import '../moderator/profile.dart';
-import '../moderator/family_tree.dart';
-
 
 class ModeratorDashboard extends StatefulWidget {
+  final String userId;
+  final String email;
+  final String familyId;
+
+  ModeratorDashboard({
+    required this.userId,
+    required this.email,
+    required this.familyId,
+  });
+
   @override
   _ModeratorDashboardState createState() => _ModeratorDashboardState();
 }
 
 class _ModeratorDashboardState extends State<ModeratorDashboard> {
   final FirebaseAuth _auth = FirebaseAuth.instance;
-  String? familyID;
-  String? email;
   int _selectedIndex = 0;
 
   @override
   void initState() {
     super.initState();
     _selectedIndex = -1;
-    _loadUserData();
-  }
-
-  Future<void> _loadUserData() async {
-    User? user = _auth.currentUser;
-    if (user != null) {
-      setState(() {
-        email = user.email;
-      });
-
-      var snapshot = await FirebaseFirestore.instance
-          .collection('families')
-          .where("moderators", arrayContains: user.uid)
-          .get();
-
-      if (snapshot.docs.isNotEmpty) {
-        setState(() {
-          familyID = snapshot.docs.first.id;
-        });
-      }
-    }
   }
 
   void _logout() async {
     await _auth.signOut();
     Navigator.pushReplacement(
-        context, MaterialPageRoute(builder: (context) => WelcomeScreen()));
+        context,
+        MaterialPageRoute(builder: (context) => WelcomeScreen())
+    );
   }
 
   void _onLogoTap() {
@@ -69,7 +58,7 @@ class _ModeratorDashboardState extends State<ModeratorDashboard> {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Text(
-            "Hello ${email ?? 'moderator'},",
+            "Hello ${widget.email},",
             style: TextStyle(
                 fontSize: 40, fontWeight: FontWeight.bold, color: Colors.black),
           ),
@@ -82,7 +71,9 @@ class _ModeratorDashboardState extends State<ModeratorDashboard> {
             iconPath: "assets/images/tree.png",
             label: "Family Tree",
             onTap: () {
-              // Navigate to Family Tree page
+              setState(() {
+                _selectedIndex = 0;
+              });
             },
           ),
           SizedBox(height: 20),
@@ -90,7 +81,9 @@ class _ModeratorDashboardState extends State<ModeratorDashboard> {
             iconPath: "assets/images/events.png",
             label: "Manage Family Events",
             onTap: () {
-              // Navigate to Event Management page
+              setState(() {
+                _selectedIndex = 1;
+              });
             },
           ),
         ],
@@ -98,10 +91,11 @@ class _ModeratorDashboardState extends State<ModeratorDashboard> {
     );
   }
 
-  Widget _buildDashboardButton(
-      {required String iconPath,
-        required String label,
-        required VoidCallback onTap}) {
+  Widget _buildDashboardButton({
+    required String iconPath,
+    required String label,
+    required VoidCallback onTap,
+  }) {
     return GestureDetector(
       onTap: onTap,
       child: Container(
@@ -136,11 +130,11 @@ class _ModeratorDashboardState extends State<ModeratorDashboard> {
 
     switch (_selectedIndex) {
       case 0:
-        return Center(child: Text("Family Tree Page (Coming Soon)"));
+        return FamilyTreePage(familyID: widget.familyId, role: 'moderator');
       case 1:
-        return Center(child: Text("Events Page (Coming Soon)"));
+        return EventPage(familyID: widget.familyId, role: 'moderator');
       case 2:
-        return ModeratorProfile(familyID: familyID!);
+        return ModeratorProfilePage(familyId: widget.familyId);
       default:
         return Center(child: Text("Page not found"));
     }

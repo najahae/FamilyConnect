@@ -4,7 +4,9 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'familymember/dashboard.dart';
 import 'moderator/dashboard.dart';
+import 'admin/login_page.dart';
 import 'sign_up.dart';
+import 'package:firebase_messaging/firebase_messaging.dart';
 
 class LoginScreen extends StatefulWidget {
   final String? familyID;
@@ -72,6 +74,25 @@ class _LoginScreenState extends State<LoginScreen> {
           .doc(userId)
           .get();
 
+      // Assuming user is successfully logged in
+      User? user = FirebaseAuth.instance.currentUser;
+      if (user != null) {
+        FirebaseMessaging messaging = FirebaseMessaging.instance;
+        String? token = await messaging.getToken();
+
+        if (token != null) {
+          await FirebaseFirestore.instance
+              .collection('families')
+              .doc(familyID) // You should already have the correct familyID
+              .collection(_userType == 'Moderator' ? 'moderators' : 'family_members')
+              .doc(user.uid)
+              .update({
+            'fcmToken': token,
+          });
+        }
+      }
+
+
       if (!doc.exists) {
         setState(() => _errorMessage = "No $_userType account found in this Family ID.");
         return;
@@ -85,8 +106,16 @@ class _LoginScreenState extends State<LoginScreen> {
         context,
         MaterialPageRoute(
           builder: (context) => _userType == "Moderator"
-              ? ModeratorDashboard()
-              : FamilyMemberDashboard(),
+              ? ModeratorDashboard(
+            userId: userId,
+            email: email,
+            familyId: familyID,
+          )
+              : FamilyMemberDashboard(
+            userId: userId,
+            familyId: familyID,
+            userData: doc.data() as Map<String, dynamic>,
+          ),
         ),
       );
     } catch (e) {
@@ -230,6 +259,24 @@ class _LoginScreenState extends State<LoginScreen> {
                       ),
                     ],
                   ),
+                  SizedBox(height: 10),
+                  TextButton(
+                    onPressed: () {
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(builder: (context) => AdminLoginScreen()),
+                      );
+                    },
+                    child: Text(
+                      "Login as Admin",
+                      style: TextStyle(
+                        color: Colors.brown,
+                        fontWeight: FontWeight.bold,
+                        decoration: TextDecoration.underline,
+                      ),
+                    ),
+                  ),
+
                 ],
               ),
             )

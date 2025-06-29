@@ -6,10 +6,12 @@ import 'package:multi_select_flutter/multi_select_flutter.dart';
 import 'location_picker.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:table_calendar/table_calendar.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 
 class EventPage extends StatefulWidget {
   final String familyID;
-  const EventPage({Key? key, required this.familyID}) : super(key: key);
+  final String role;
+  const EventPage({Key? key, required this.familyID, this.role = 'family_member',}) : super(key: key);
 
   @override
   State<EventPage> createState() => _EventPageState();
@@ -28,6 +30,11 @@ class _EventPageState extends State<EventPage> {
   }
 
   Future<void> _fetchEventsForSelectedDay() async {
+    final currentUserId = FirebaseAuth.instance.currentUser?.uid;
+    if (currentUserId == null) return;
+
+    final isModerator = widget.role == 'moderator';
+
     final snapshot = await FirebaseFirestore.instance
         .collection('families')
         .doc(widget.familyID)
@@ -36,11 +43,20 @@ class _EventPageState extends State<EventPage> {
         .get();
 
     setState(() {
-      _events = snapshot.docs;
+      _events = snapshot.docs.where((doc) {
+        if (isModerator) return true;
+        final invitedIds = doc.data()['invitedMemberIds'] as List<dynamic>?;
+        return invitedIds == null || invitedIds.contains(currentUserId);
+      }).toList();
     });
   }
 
   Future<void> _fetchMarkedDates(DateTime focusedDay) async {
+    final currentUserId = FirebaseAuth.instance.currentUser?.uid;
+    if (currentUserId == null) return;
+
+    final isModerator = widget.role == 'moderator';
+
     final startOfMonth = DateTime(focusedDay.year, focusedDay.month, 1);
     final endOfMonth = DateTime(focusedDay.year, focusedDay.month + 1, 0);
 
@@ -52,7 +68,11 @@ class _EventPageState extends State<EventPage> {
         .where('date', isLessThanOrEqualTo: DateFormat('yyyy-MM-dd').format(endOfMonth))
         .get();
 
-    final dates = snapshot.docs.map((doc) {
+    final dates = snapshot.docs.where((doc) {
+      if (isModerator) return true;
+      final invitedIds = doc.data()['invitedMemberIds'] as List<dynamic>?;
+      return invitedIds == null || invitedIds.contains(currentUserId);
+    }).map((doc) {
       final dateStr = doc['date'] as String;
       return DateFormat('yyyy-MM-dd').parse(dateStr);
     }).toSet();
@@ -62,15 +82,86 @@ class _EventPageState extends State<EventPage> {
     });
   }
 
-
-  Future<List<String>> _fetchFamilyMembers() async {
+  Future<List<Map<String, String>>> _fetchFamilyMembers() async {
     final snapshot = await FirebaseFirestore.instance
         .collection('families')
         .doc(widget.familyID)
         .collection('family_members')
         .get();
 
-    return snapshot.docs.map((doc) => doc['fullName'] as String).toList();
+    return snapshot.docs.map((doc) {
+      final fullName = (doc['fullName'] ?? '').toString();
+      final nickname = (doc['nickname'] ?? '').toString();
+      final display = nickname.isNotEmpty ? '$fullName ($nickname)' : fullName;
+
+      return {
+        'id': doc.id,
+        'display': display,
+      };
+    }).toList();
+  }
+
+  Future<List<String>> _getInvitedMemberNames(List<dynamic> memberIds) async {
+    List<String> names = [];
+
+    for (final id in memberIds) {
+      final doc = await FirebaseFirestore.instance
+          .collection('families')
+          .doc(widget.familyID)
+          .collection('family_members')
+          .doc(id)
+          .get();
+
+      if (doc.exists) {
+        final name = doc.data()?['fullName'] ?? '[Unknown]';
+        names.add(name);
+      }
+    }
+
+    return names;
+  }
+
+  // Function to open Google Maps with directions
+  Future<void> _openGoogleMapsDirections(dynamic location) async {
+    String url = '';
+
+    if (location is Map<String, dynamic>) {
+      // Map location with coordinates
+      final lat = location['lat'];
+      final lng = location['lng'];
+      url = 'https://www.google.com/maps/dir/?api=1&destination=$lat,$lng';
+    } else if (location is String && location.isNotEmpty) {
+      // Text location
+      final encodedLocation = Uri.encodeComponent(location);
+      url = 'https://www.google.com/maps/dir/?api=1&destination=$encodedLocation';
+    }
+
+    if (url.isNotEmpty) {
+      final uri = Uri.parse(url);
+      if (await canLaunchUrl(uri)) {
+        await launchUrl(uri, mode: LaunchMode.externalApplication);
+      } else {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Could not open Google Maps')),
+          );
+        }
+      }
+    }
+  }
+
+  // Check if current user can edit/delete the event
+  bool _canModifyEvent(DocumentSnapshot eventDoc) {
+    final currentUserId = FirebaseAuth.instance.currentUser?.uid;
+    if (currentUserId == null) return false;
+
+    // Moderators can modify all events
+    if (widget.role == 'moderator') return true;
+
+    // Event creator can modify their own events
+    final eventData = eventDoc.data() as Map<String, dynamic>;
+    final createdBy = eventData['createdBy'] as String?;
+    return createdBy == currentUserId;
   }
 
   void _showAddEventDialog({DocumentSnapshot? existingEvent}) async {
@@ -116,7 +207,7 @@ class _EventPageState extends State<EventPage> {
       });
     }
 
-    List<String> selectedMembers = List<String>.from(existingEvent?['invitedMembers'] ?? []);
+    List<String> selectedMembers = List<String>.from(existingEvent?['invitedMemberIds'] ?? []);
 
     showDialog(
       context: context,
@@ -216,18 +307,24 @@ class _EventPageState extends State<EventPage> {
                   _buildTextField(dressCodeFemaleController, 'Dress Code (Female)'),
                   const SizedBox(height: 12),
 
-                  FutureBuilder<List<String>>(
+                  FutureBuilder<List<Map<String, String>>>(
                     future: _fetchFamilyMembers(),
                     builder: (context, snapshot) {
                       if (!snapshot.hasData) return const CircularProgressIndicator();
-                      return MultiSelectDialogField<String>(
-                        items: snapshot.data!.map((e) => MultiSelectItem(e, e)).toList(),
+                      final members = snapshot.data!;
+                      return MultiSelectDialogField(
+                        items: members
+                            .map((m) => MultiSelectItem<String>(m['id']!, m['display']!))
+                            .toList(),
                         initialValue: selectedMembers,
+                        searchable: true,
                         title: const Text("Invite Family Members"),
                         buttonText: const Text("Select Members"),
                         listType: MultiSelectListType.CHIP,
                         onConfirm: (values) {
-                          selectedMembers = values;
+                          setState(() {
+                            selectedMembers = values.cast<String>();
+                          });
                         },
                       );
                     },
@@ -257,9 +354,17 @@ class _EventPageState extends State<EventPage> {
                 'endTime': composedEndTime,
                 'dressCodeMale': dressCodeMaleController.text.trim(),
                 'dressCodeFemale': dressCodeFemaleController.text.trim(),
-                'invitedMembers': selectedMembers,
+                'invitedMemberIds': selectedMembers,
                 'date': DateFormat('yyyy-MM-dd').format(_selectedDay),
               };
+
+              // Add createdBy field for new events
+              if (existingEvent == null) {
+                eventData['createdBy'] = FirebaseAuth.instance.currentUser?.uid ?? '';
+                eventData['createdAt'] = FieldValue.serverTimestamp();
+              } else {
+                eventData['updatedAt'] = FieldValue.serverTimestamp();
+              }
 
               final eventsCollection = FirebaseFirestore.instance
                   .collection('families')
@@ -277,6 +382,171 @@ class _EventPageState extends State<EventPage> {
 
             },
             child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  bool _isLocationValidForDirections(dynamic location) {
+    if (location == null) return false;
+
+    // Map location (coordinates) is always valid for directions
+    if (location is Map<String, dynamic>) {
+      return location.containsKey('lat') && location.containsKey('lng');
+    }
+
+    // For string locations, only show directions if it's not manually entered
+    // You can implement your own logic here. Some options:
+
+    // Option 1: Check if it contains coordinates-like pattern
+    if (location is String && location.isNotEmpty) {
+      // Check if it looks like coordinates (contains numbers and comma/space)
+      final coordPattern = RegExp(r'^-?\d+\.?\d*[,\s]+-?\d+\.?\d*$');
+      if (coordPattern.hasMatch(location.trim())) {
+        return true;
+      }
+
+      // Check if it's a recognizable address format (contains common address keywords)
+      final addressKeywords = ['street', 'road', 'avenue', 'boulevard', 'lane', 'drive', 'plaza', 'square'];
+      final lowerLocation = location.toLowerCase();
+      if (addressKeywords.any((keyword) => lowerLocation.contains(keyword))) {
+        return true;
+      }
+
+      // You can add more sophisticated checks here
+      return false;
+    }
+
+    return false;
+  }
+
+  void _showEventDetailsDialog(DocumentSnapshot eventDoc) async {
+    final data = eventDoc.data() as Map<String, dynamic>;
+    final List<dynamic> invitedIds = data['invitedMemberIds'] ?? [];
+    final canModify = _canModifyEvent(eventDoc);
+
+    final memberDocs = await Future.wait(invitedIds.map((id) {
+      return FirebaseFirestore.instance
+          .collection('families')
+          .doc(widget.familyID)
+          .collection('family_members')
+          .doc(id)
+          .get();
+    }));
+
+    final List<Map<String, dynamic>> invitedMembers = await Future.wait(
+      memberDocs.map((doc) async {
+        final uid = doc.id;
+        final name = doc['fullName'] ?? 'Unknown';
+        final nickname = doc['nickname'] ?? '';
+        final initials = name.isNotEmpty ? name.trim().split(" ").map((e) => e[0]).take(2).join().toUpperCase() : '?';
+
+        // Get RSVP status
+        final notifDoc = await FirebaseFirestore.instance
+            .collection("families")
+            .doc(widget.familyID)
+            .collection("family_members")
+            .doc(uid)
+            .collection("notifications")
+            .where("eventId", isEqualTo: eventDoc.id)
+            .limit(1)
+            .get();
+
+        final rsvp = notifDoc.docs.isNotEmpty
+            ? (notifDoc.docs.first.data()['rsvpStatus'] ?? 'Pending')
+            : 'Pending';
+
+        return {
+          'name': name,
+          'nickname': nickname,
+          'initials': initials,
+          'rsvp': rsvp,
+        };
+      }),
+    );
+
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(data['title'] ?? 'Event Details'),
+        content: SingleChildScrollView(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Expanded(
+                    child: Text("📍 Location: ${data['location'] is String ? data['location'] : 'Pinned Map'}"),
+                  ),
+                  if (_isLocationValidForDirections(data['location']))
+                    IconButton(
+                      icon: const Icon(Icons.directions, color: Colors.blue),
+                      tooltip: 'Get Directions',
+                      onPressed: () => _openGoogleMapsDirections(data['location']),
+                    ),
+                ],
+              ),
+              Text("🕒 ${data['startTime']} - ${data['endTime']}"),
+              if ((data['dressCodeMale'] ?? '').isNotEmpty)
+                Text("👔 Dress Code (Male): ${data['dressCodeMale']}"),
+              if ((data['dressCodeFemale'] ?? '').isNotEmpty)
+                Text("👗 Dress Code (Female): ${data['dressCodeFemale']}"),
+              const SizedBox(height: 12),
+              Text("Invited Members", style: const TextStyle(fontWeight: FontWeight.bold)),
+              const SizedBox(height: 8),
+              Wrap(
+                spacing: 10,
+                children: invitedMembers.map((m) {
+                  return GestureDetector(
+                    onTap: () {
+                      showDialog(
+                        context: context,
+                        builder: (_) => AlertDialog(
+                          title: Text(m['name']),
+                          content: Text(m['nickname'].isNotEmpty ? "Nickname: ${m['nickname']}" : "No nickname"),
+                          actions: [
+                            TextButton(onPressed: () => Navigator.pop(context), child: Text("Close")),
+                          ],
+                        ),
+                      );
+                    },
+                    child: Column(
+                      children: [
+                        CircleAvatar(
+                          child: Text(m['initials'], style: TextStyle(color: Colors.white)),
+                          backgroundColor: Colors.green,
+                        ),
+                        const SizedBox(height: 4),
+                        Text(m['rsvp'], style: TextStyle(fontSize: 10)),
+                      ],
+                    ),
+                  );
+                }).toList(),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          if (canModify) ...[
+            TextButton(
+              onPressed: () {
+                Navigator.pop(context);
+                _showAddEventDialog(existingEvent: eventDoc);
+              },
+              child: const Text("Edit", style: TextStyle(color: Colors.orange)),
+            ),
+            TextButton(
+              onPressed: () {
+                Navigator.pop(context);
+                _confirmDeleteEvent(eventDoc.id);
+              },
+              child: const Text("Delete", style: TextStyle(color: Colors.red)),
+            ),
+          ],
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text("Close"),
           ),
         ],
       ),
@@ -335,7 +605,6 @@ class _EventPageState extends State<EventPage> {
     );
   }
 
-
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -364,6 +633,9 @@ class _EventPageState extends State<EventPage> {
             firstDay: DateTime(2000),
             lastDay: DateTime(2100),
             focusedDay: _selectedDay,
+            availableCalendarFormats: const {
+              CalendarFormat.month: 'Month',
+            },
             selectedDayPredicate: (day) => isSameDay(day, _selectedDay),
             onDaySelected: (selectedDay, focusedDay) {
               setState(() {
@@ -372,7 +644,11 @@ class _EventPageState extends State<EventPage> {
               _fetchEventsForSelectedDay();
             },
             onPageChanged: (focusedDay) {
+              setState(() {
+                _selectedDay = focusedDay;
+              });
               _fetchMarkedDates(focusedDay);
+              _fetchEventsForSelectedDay(); // Optional, if want to preload that day's events
             },
             calendarStyle: const CalendarStyle(
               todayDecoration: BoxDecoration(
@@ -408,137 +684,59 @@ class _EventPageState extends State<EventPage> {
               itemCount: _events.length,
               itemBuilder: (context, index) {
                 final event = _events[index].data() as Map<String, dynamic>;
+                final canModify = _canModifyEvent(_events[index]);
+
                 return Card(
-                  margin: const EdgeInsets.all(8),
+                  margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
                   shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                   elevation: 4,
-                  child: Padding(
-                    padding: const EdgeInsets.all(12.0),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          event['title'] ?? 'Untitled',
-                          style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-                        ),
-                        const SizedBox(height: 8),
-
-                        Text(
-                          "🕒 From ${event['startTime']} to ${event['endTime']}",
-                          style: const TextStyle(fontSize: 14),
-                        ),
-                        const SizedBox(height: 8),
-
-                        if (event['location'] is String) ...[
-                          Text(
-                            "📍 Location: ${event['location']}",
-                            style: const TextStyle(fontSize: 14),
-                          ),
-                        ] else if (event['location'] is Map<String, dynamic>) ...[
-                          const Text(
-                            "📌 Pinned Location:",
-                            style: TextStyle(fontSize: 14),
-                          ),
-                          const SizedBox(height: 8),
-                          Builder(
-                            builder: (context) {
-                              final lat = event['location']['lat'];
-                              final lng = event['location']['lng'];
-
-                              return GestureDetector(
-                                onTap: () async {
-                                  final googleMapsUrl = 'https://www.google.com/maps/search/?api=1&query=$lat,$lng';
-
-                                  try {
-                                    if (!await launchUrl(Uri.parse(googleMapsUrl), mode: LaunchMode.externalApplication)) {
-                                      throw 'Could not launch';
-                                    }
-                                  } catch (e) {
-                                    ScaffoldMessenger.of(context).showSnackBar(
-                                      const SnackBar(content: Text('Could not open Google Maps.')),
-                                    );
-                                  }
-                                },
-                                child: SizedBox(
-                                  height: 160,
-                                  child: ClipRRect(
-                                    borderRadius: BorderRadius.circular(8),
-                                    child: GoogleMap(
-                                      initialCameraPosition: CameraPosition(
-                                        target: LatLng(lat, lng),
-                                        zoom: 15,
-                                      ),
-                                      markers: {
-                                        Marker(
-                                          markerId: const MarkerId('eventLocation'),
-                                          position: LatLng(lat, lng),
-                                        ),
-                                      },
-                                      zoomControlsEnabled: false,
-                                      myLocationButtonEnabled: false,
-                                      scrollGesturesEnabled: false,
-                                      rotateGesturesEnabled: false,
-                                      tiltGesturesEnabled: false,
-                                      mapToolbarEnabled: false,
-                                    ),
-                                  ),
-                                ),
-                              );
-                            },
-                          ),
-                        ],
-
-                        const SizedBox(height: 8),
-
-                        if ((event['dressCodeMale'] ?? '').isNotEmpty || (event['dressCodeFemale'] ?? '').isNotEmpty)
-                          Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
+                  child: InkWell(
+                    onTap: () => _showEventDetailsDialog(_events[index]),
+                    child: Padding(
+                      padding: const EdgeInsets.all(12.0),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Row(
                             children: [
-                              if ((event['dressCodeMale'] ?? '').isNotEmpty)
-                                Text("👔 Male Dress Code: ${event['dressCodeMale']}"),
-                              if ((event['dressCodeFemale'] ?? '').isNotEmpty)
-                                Text("👗 Female Dress Code: ${event['dressCodeFemale']}"),
-                              const SizedBox(height: 8),
+                              Expanded(
+                                child: Text(
+                                  event['title'] ?? 'Untitled',
+                                  style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                                ),
+                              ),
+                              if (canModify) ...[
+                                IconButton(
+                                  icon: const Icon(Icons.edit, color: Colors.orange, size: 20),
+                                  onPressed: () => _showAddEventDialog(existingEvent: _events[index]),
+                                  tooltip: 'Edit Event',
+                                ),
+                                IconButton(
+                                  icon: const Icon(Icons.delete, color: Colors.red, size: 20),
+                                  onPressed: () => _confirmDeleteEvent(_events[index].id),
+                                  tooltip: 'Delete Event',
+                                ),
+                              ],
+                              if (_isLocationValidForDirections(event['location']))
+                                IconButton(
+                                  icon: const Icon(Icons.directions, color: Colors.blue, size: 20),
+                                  onPressed: () => _openGoogleMapsDirections(event['location']),
+                                  tooltip: 'Get Directions',
+                                ),
                             ],
                           ),
-
-                        if (event['invitedMembers'] != null && event['invitedMembers'] is List)
+                          const SizedBox(height: 8),
                           Text(
-                            "Invited: ${(event['invitedMembers'] as List).join(', ')}",
+                            "🕒 From ${event['startTime']} to ${event['endTime']}",
                             style: const TextStyle(fontSize: 14),
                           ),
-
-                        const SizedBox(height: 12),
-
-                        Row(
-                          mainAxisAlignment: MainAxisAlignment.end,
-                          children: [
-                            ElevatedButton(
-                              onPressed: () {
-                                _showAddEventDialog(existingEvent: _events[index]);
-                              },
-                              style: ElevatedButton.styleFrom(
-                                backgroundColor: Colors.blue,
-                                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-                              ),
-                              child: const Text('Edit'),
-                            ),
-                            const SizedBox(width: 12),
-                            ElevatedButton(
-                              onPressed: () {
-                                _confirmDeleteEvent(_events[index].id);
-                              },
-                              style: ElevatedButton.styleFrom(
-                                backgroundColor: Colors.red,
-                                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-                              ),
-                              child: const Text('Delete'),
-                            ),
-                          ],
-                        ),
-                      ],
+                          const SizedBox(height: 8),
+                          if ((event['dressCodeMale'] ?? '').isNotEmpty)
+                            Text("👔 Male Dress Code: ${event['dressCodeMale']}"),
+                          if ((event['dressCodeFemale'] ?? '').isNotEmpty)
+                            Text("👗 Female Dress Code: ${event['dressCodeFemale']}"),
+                        ],
+                      ),
                     ),
                   ),
                 );

@@ -1,3 +1,4 @@
+import 'package:familytree/screens/admin/sign_up.dart';
 import 'package:flutter/material.dart';
 import 'sign_up.dart';
 import 'login_page.dart';
@@ -15,7 +16,15 @@ class WelcomeScreen extends StatelessWidget {
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              Image.asset("assets/images/logo.png", height: 180),
+              GestureDetector(
+                onLongPress: () {
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(builder: (_) => const AdminSignUpScreen()),
+                  );
+                },
+                child: Image.asset("assets/images/logo.png", height: 120),
+              ),
               const SizedBox(height: 30),
               const Text(
                 "Welcome to FamilyConnect!",

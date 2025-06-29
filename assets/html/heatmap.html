@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Heatmap</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <style>
+        html, body, #map { height: 100%; margin: 0; padding: 0; }
+    </style>
+</head>
+<body>
+<div id="map"></div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/leaflet.heat/dist/leaflet-heat.js"></script>
+
+<script>
+    const map = L.map('map').setView([3.1390, 101.6869], 7);
+
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: 'Map data © OpenStreetMap contributors'
+    }).addTo(map);
+
+    let heatLayer;
+
+    function updateHeatmap(data) {
+      try {
+        const latlngs = JSON.parse(data);
+        console.log("Heatmap data received:", latlngs);
+        if (heatLayer) map.removeLayer(heatLayer);
+        heatLayer = L.heatLayer(latlngs, {
+  radius: 60,          // Bigger glow size
+  blur: 40,            // Softer blur
+  maxZoom: 17,
+  max: 0.7,            // Increases intensity
+  gradient: {
+    0.2: 'rgba(0, 255, 0, 0.5)',   // greenish low
+    0.4: 'rgba(255, 255, 0, 0.6)', // yellow
+    0.6: 'rgba(255, 140, 0, 0.7)', // orange
+    0.8: 'rgba(255, 0, 0, 0.9)',   // red
+    1.0: 'rgba(128, 0, 0, 1.0)'    // dark red
+  }
+}).addTo(map);
+      } catch (e) {
+        console.error("Failed to parse or render heatmap data", e);
+      }
+    }
+
+    window.addEventListener("message", (event) => {
+      updateHeatmap(event.data);
+    });
+</script>
+</body>
+</html>
