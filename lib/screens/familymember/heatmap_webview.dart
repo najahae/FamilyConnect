@@ -47,20 +47,41 @@ class _HeatMapWebViewState extends State<HeatMapWebView> {
       }
     }
 
+    if (coords.isEmpty) {
+      debugPrint("No coordinate data available");
+      return;
+    }
+
     final encoded = jsonEncode(coords);
     debugPrint("Sending heatmap data: $encoded");
 
-    // Wait a tiny bit to ensure WebView is ready
-    await Future.delayed(const Duration(milliseconds: 300));
-    _controller.runJavaScript('window.postMessage(`$encoded`, "*");');
+    // Retry mechanism in case WebView isn't ready
+    int attempts = 0;
+    while (attempts < 3) {
+      try {
+        await _controller.runJavaScript('''
+          if (typeof updateHeatmap === 'function') {
+            updateHeatmap(`$encoded`);
+          }
+        ''');
+        break;
+      } catch (e) {
+        attempts++;
+        debugPrint("Attempt $attempts failed: $e");
+        await Future.delayed(const Duration(milliseconds: 500));
+      }
+    }
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text("Family Residence Heatmap"),
-        backgroundColor: Colors.green[300],
+        title: const Text('Family Residence Heatmap'),
+        backgroundColor: Colors.green[200],
+        shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(bottom: Radius.circular(20)),
+        ),
       ),
       body: WebViewWidget(controller: _controller),
     );

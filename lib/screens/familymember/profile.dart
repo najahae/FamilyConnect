@@ -4,6 +4,8 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:firebase_storage/firebase_storage.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:permission_handler/permission_handler.dart';
+import 'package:geolocator/geolocator.dart';
 import 'dart:io';
 
 class FamilyProfilePage extends StatefulWidget {
@@ -55,6 +57,114 @@ class _FamilyProfilePageState extends State<FamilyProfilePage> {
     initSpouseData();
   }
 
+  Future<List<LatLng>> _getLocationHistory() async {
+    final doc = await _firestore
+        .collection('families')
+        .doc(widget.familyId)
+        .collection('family_members')
+        .doc(widget.userId)
+        .get();
+
+    final data = doc.data() ?? {};
+    final history = data['locationHistory'] as List? ?? [];
+    print('Raw history entries: ${history.length}'); // See how many raw entries
+    print('Raw history data: $history'); // Print the raw data
+
+    final List<LatLng> distinctHistory = [];
+    final Set<String> seenLocations = {}; // Use a Set to track seen locations
+
+    for (var loc in history) {
+      try {
+        final lat = double.parse(loc['latitude'].toString());
+        final lng = double.parse(loc['longitude'].toString());
+        final latLng = LatLng(lat, lng);
+        // Create a unique key for comparison (e.g., rounded to 6 decimal places)
+        final key = '${lat.toStringAsFixed(6)},${lng.toStringAsFixed(6)}';
+
+        if (!seenLocations.contains(key)) {
+          distinctHistory.add(latLng);
+          seenLocations.add(key);
+        }
+      } catch (e) {
+        print("Error parsing location history entry: $e, entry: $loc");
+        // Optionally, log this error to crashlytics or similar
+      }
+    }
+    print('Distinct history locations: ${distinctHistory.length}');
+    print('Distinct history data: $distinctHistory'); // Print the processed LatLng list
+    return distinctHistory;
+  }
+
+  Future<void> _pickLocationOnMap() async {
+    if (isLoading) return; // Prevent interaction if data is still loading
+
+    var status = await Permission.locationWhenInUse.status;
+    if (!status.isGranted) {
+      status = await Permission.locationWhenInUse.request();
+      if (!status.isGranted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Location permission denied. Cannot fetch current location.')),
+        );
+      }
+    }
+
+    try {
+      final currentLocation = LatLng(latitude, longitude);
+      final previousLocations = await _getLocationHistory();
+
+      LatLng? newLocation = await showDialog<LatLng>(
+        context: context,
+        builder: (context) => LocationPickerDialog(
+          currentLocation: currentLocation,
+          previousLocations: previousLocations,
+          hasLocationPermission: status.isGranted, // Pass permission status
+        ),
+      );
+
+      if (newLocation != null) {
+        // Only update if the new location is different from the current one
+        if (newLocation.latitude != latitude || newLocation.longitude != longitude) {
+          // Update Firestore
+          await _firestore
+              .collection('families')
+              .doc(widget.familyId)
+              .collection('family_members')
+              .doc(widget.userId)
+              .update({
+            'location': {
+              'latitude': newLocation.latitude,
+              'longitude': newLocation.longitude,
+            },
+            'locationHistory': FieldValue.arrayUnion([{
+              'latitude': newLocation.latitude,
+              'longitude': newLocation.longitude,
+              'timestamp': DateTime.now().toIso8601String(),
+            }]),
+          });
+
+          // Update local state
+          setState(() {
+            latitude = newLocation.latitude;
+            longitude = newLocation.longitude;
+          });
+
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Location updated successfully!')),
+          );
+        } else {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Location is already set to this point.')),
+          );
+        }
+      }
+    } catch (e) {
+      print('Failed to update location: $e'); // Log the error for debugging
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Failed to update location: ${e.toString()}')),
+      );
+    }
+  }
+
   Future<void> initSpouseData() async {
     final doc = await _firestore
         .collection('families')
@@ -84,7 +194,7 @@ class _FamilyProfilePageState extends State<FamilyProfilePage> {
     if (doc.exists) {
       final data = doc.data()!;
       setState(() {
-        imageUrl = data['imageUrl']; // Load from Firestore
+        imageUrl = data['profileImageUrl']; // Load from Firestore
         fullName = data['fullName'] ?? '';
         nickname = data['nickname'] ?? '';
         email = data['email'] ?? '';
@@ -101,34 +211,39 @@ class _FamilyProfilePageState extends State<FamilyProfilePage> {
   }
 
   Future<void> _pickAndUploadImage() async {
-    final picker = ImagePicker();
-    final pickedFile = await picker.pickImage(source: ImageSource.gallery);
+    try {
+      final picker = ImagePicker();
+      final pickedFile = await picker.pickImage(source: ImageSource.gallery);
+      if (pickedFile == null) return;
 
-    if (pickedFile != null) {
+      setState(() => isLoading = true);
       final file = File(pickedFile.path);
+      final uid = _auth.currentUser?.uid;
+      if (uid == null) throw 'User not authenticated';
+
+      // Upload to consistent path
       final storageRef = FirebaseStorage.instance
           .ref()
-          .child('profile_pictures')
-          .child('${widget.userId}.jpg');
+          .child('family_members/${widget.familyId}/$uid/profile.jpg');
 
       await storageRef.putFile(file);
       final downloadUrl = await storageRef.getDownloadURL();
 
-      // Update Firestore
+      // Save to Firestore with CORRECT field name
       await _firestore
           .collection('families')
           .doc(widget.familyId)
           .collection('family_members')
-          .doc(widget.userId)
-          .update({'imageUrl': downloadUrl});
+          .doc(uid)
+          .update({'profileImageUrl': downloadUrl});
 
       setState(() {
-        imageUrl = downloadUrl;
+        imageUrl = downloadUrl; // Or cachedUrl if using Option B
+        isLoading = false;
       });
-
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Profile picture updated!')),
-      );
+    } catch (e) {
+      setState(() => isLoading = false);
+      debugPrint('Upload error: $e');
     }
   }
 
@@ -151,6 +266,136 @@ class _FamilyProfilePageState extends State<FamilyProfilePage> {
     });
   }
 
+  Future<void> _selectSpouse() async {
+    // First fetch all members with their genders
+    final membersSnapshot = await _firestore
+        .collection('families')
+        .doc(widget.familyId)
+        .collection('family_members')
+        .get();
+
+    // Filter based on opposite gender
+    final filteredByGender = membersSnapshot.docs.where((doc) {
+      return doc.id != widget.userId && // exclude self
+          (doc['gender'] ?? '').toLowerCase() != gender.toLowerCase(); // opposite gender
+    }).toList();
+
+    String? selectedId = await showModalBottomSheet<String>(
+      context: context,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (context) {
+        TextEditingController searchController = TextEditingController();
+        List<Map<String, dynamic>> filteredMembers = filteredByGender.map((doc) {
+          return {
+            'id': doc.id,
+            'name': doc['fullName'] ?? 'Unknown',
+            'gender': doc['gender'] ?? '',
+            'email': doc['email'] ?? '',
+          };
+        }).toList();
+        List<Map<String, dynamic>> displayMembers = List.from(filteredMembers);
+
+        return StatefulBuilder(
+          builder: (context, setState) {
+            return Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Padding(
+                  padding: const EdgeInsets.all(16.0),
+                  child: Text(
+                    "Select Spouse",
+                    style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18),
+                  ),
+                ),
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 16.0),
+                  child: TextField(
+                    controller: searchController,
+                    decoration: InputDecoration(
+                      hintText: 'Search by name...',
+                      prefixIcon: const Icon(Icons.search),
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                    ),
+                    onChanged: (value) {
+                      setState(() {
+                        displayMembers = filteredMembers.where((member) {
+                          return member['name'].toLowerCase().contains(value.toLowerCase());
+                        }).toList();
+                      });
+                    },
+                  ),
+                ),
+                const SizedBox(height: 10),
+                const Divider(),
+                // None option
+                ListTile(
+                  leading: const Icon(Icons.cancel, color: Colors.grey),
+                  title: const Text('None'),
+                  onTap: () => Navigator.pop(context, ''),
+                ),
+                const Divider(),
+                if (displayMembers.isEmpty)
+                  const Padding(
+                    padding: EdgeInsets.all(16.0),
+                    child: Text('No matching members found'),
+                  )
+                else
+                  Expanded(
+                    child: ListView.builder(
+                      itemCount: displayMembers.length,
+                      itemBuilder: (context, index) {
+                        final member = displayMembers[index];
+                        return ListTile(
+                          leading: CircleAvatar(
+                            backgroundColor: member['gender'].toLowerCase() == 'male'
+                                ? Colors.blue[100]
+                                : Colors.pink[100],
+                            child: Icon(
+                              member['gender'].toLowerCase() == 'male'
+                                  ? Icons.male
+                                  : Icons.female,
+                              color: member['gender'].toLowerCase() == 'male'
+                                  ? Colors.blue
+                                  : Colors.pink,
+                            ),
+                          ),
+                          title: Text(member['name']),
+                          subtitle: Text(member['email']),
+                          trailing: _selectedSpouseId == member['id']
+                              ? const Icon(Icons.check, color: Colors.green)
+                              : null,
+                          onTap: () => Navigator.pop(context, member['id']),
+                        );
+                      },
+                    ),
+                  ),
+              ],
+            );
+          },
+        );
+      },
+    );
+
+    // Update Firestore with selectedId (which could be empty string for 'None')
+    await _firestore
+        .collection('families')
+        .doc(widget.familyId)
+        .collection('family_members')
+        .doc(widget.userId)
+        .update({
+      'spouseId': selectedId == '' ? FieldValue.delete() : selectedId,
+    });
+
+    setState(() {
+      _selectedSpouseId = selectedId == '' ? null : selectedId;
+    });
+  }
+
   Future<void> _loadSpouseOptions(String currentMemberId, String gender) async {
     final snapshot = await FirebaseFirestore.instance
         .collection('families')
@@ -166,6 +411,8 @@ class _FamilyProfilePageState extends State<FamilyProfilePage> {
           .map((doc) => {
         'id': doc.id,
         'name': doc['fullName'] ?? '[Unnamed]',
+        'email': doc['email'],
+        'gender': doc['gender'],
       })
           .toList();
     });
@@ -242,85 +489,128 @@ class _FamilyProfilePageState extends State<FamilyProfilePage> {
     );
   }
 
-  Future<void> _pickLocationOnMap() async {
-    if (isLoading) return; // prevent opening the dialog before data loads
-
-    LatLng currentLocation = LatLng(latitude, longitude);
-    LatLng? newLocation = await showDialog<LatLng>(
-      context: context,
-      builder: (context) => LocationPickerMap(initialLocation: currentLocation),
-    );
-
-    if (newLocation != null) {
-      await _firestore
-          .collection('families')
-          .doc(widget.familyId)
-          .collection('family_members')
-          .doc(widget.userId)
-          .update({
-        'location': {
-          'latitude': newLocation.latitude,
-          'longitude': newLocation.longitude,
-        },
-      });
-
-      setState(() {
-        latitude = newLocation.latitude;
-        longitude = newLocation.longitude;
-      });
-    }
-  }
-
   Future<void> _selectParent(String type) async {
+    // First fetch all members with their genders
+    final membersSnapshot = await _firestore
+        .collection('families')
+        .doc(widget.familyId)
+        .collection('family_members')
+        .get();
+
+    // Filter based on gender (male for father, female for mother)
+    final filteredByGender = membersSnapshot.docs.where((doc) {
+      final gender = doc['gender']?.toString().toLowerCase() ?? '';
+      return type == 'father'
+          ? gender == 'male'
+          : gender == 'female';
+    }).toList();
+
     String? selectedId = await showModalBottomSheet<String>(
       context: context,
-      shape: RoundedRectangleBorder(
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
       ),
       builder: (context) {
-        return Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Padding(
-              padding: const EdgeInsets.all(16.0),
-              child: Text("Select ${type == 'father' ? 'Father' : 'Mother'}", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18)),
-            ),
-            Divider(),
-            Expanded(
-              child: ListView.builder(
-                itemCount: _members.length,
-                itemBuilder: (context, index) {
-                  final member = _members[index];
-                  return ListTile(
-                    title: Text(member['name']),
-                    onTap: () => Navigator.pop(context, member['id']),
-                  );
-                },
-              ),
-            ),
-          ],
+        TextEditingController searchController = TextEditingController();
+        List<Map<String, dynamic>> filteredMembers = filteredByGender.map((doc) {
+          return {
+            'id': doc.id,
+            'name': doc['fullName'] ?? 'Unknown',
+          };
+        }).toList();
+        List<Map<String, dynamic>> displayMembers = List.from(filteredMembers);
+
+        return StatefulBuilder(
+          builder: (context, setState) {
+            return Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Padding(
+                  padding: const EdgeInsets.all(16.0),
+                  child: Text(
+                    "Select ${type == 'father' ? 'Father' : 'Mother'}",
+                    style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18),
+                  ),
+                ),
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 16.0),
+                  child: TextField(
+                    controller: searchController,
+                    decoration: InputDecoration(
+                      hintText: 'Search by name...',
+                      prefixIcon: const Icon(Icons.search),
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                    ),
+                    onChanged: (value) {
+                      setState(() {
+                        displayMembers = filteredMembers.where((member) {
+                          return member['name'].toLowerCase().contains(value.toLowerCase());
+                        }).toList();
+                      });
+                    },
+                  ),
+                ),
+                const SizedBox(height: 10),
+                const Divider(),
+                // None option
+                ListTile(
+                  leading: const Icon(Icons.cancel, color: Colors.grey),
+                  title: const Text('None'),
+                  onTap: () => Navigator.pop(context, ''),
+                ),
+                const Divider(),
+                if (displayMembers.isEmpty)
+                  const Padding(
+                    padding: EdgeInsets.all(16.0),
+                    child: Text('No matching members found'),
+                  )
+                else
+                  Expanded(
+                    child: ListView.builder(
+                      itemCount: displayMembers.length,
+                      itemBuilder: (context, index) {
+                        final member = displayMembers[index];
+                        return ListTile(
+                          leading: Icon(
+                            type == 'father' ? Icons.male : Icons.female,
+                            color: type == 'father' ? Colors.blue : Colors.pink,
+                          ),
+                          title: Text(member['name']),
+                          trailing: (type == 'father' ? _fatherId : _motherId) == member['id']
+                              ? const Icon(Icons.check, color: Colors.green)
+                              : null,
+                          onTap: () => Navigator.pop(context, member['id']),
+                        );
+                      },
+                    ),
+                  ),
+              ],
+            );
+          },
         );
       },
     );
 
-    if (selectedId != null) {
-      await _firestore
-          .collection('families')
-          .doc(widget.familyId)
-          .collection('family_members')
-          .doc(widget.userId)
-          .update({
-        type == 'father' ? 'fatherId' : 'motherId': selectedId,
-      });
+    // Update Firestore with selectedId (which could be empty string for 'None')
+    await _firestore
+        .collection('families')
+        .doc(widget.familyId)
+        .collection('family_members')
+        .doc(widget.userId)
+        .update({
+      type == 'father' ? 'fatherId' : 'motherId': selectedId == '' ? FieldValue.delete() : selectedId,
+    });
 
-      setState(() {
-        if (type == 'father') {
-          _fatherId = selectedId;
-        } else {
-          _motherId = selectedId;
-        }
-      });
-    }
+    setState(() {
+      if (type == 'father') {
+        _fatherId = selectedId == '' ? '' : selectedId ?? '';
+      } else {
+        _motherId = selectedId == '' ? '' : selectedId ?? '';
+      }
+    });
   }
 
   Future<void> _selectGender() async {
@@ -615,33 +905,39 @@ class _FamilyProfilePageState extends State<FamilyProfilePage> {
               Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
+                  ListTile(
+                    leading: const Icon(Icons.favorite, color: Colors.pink),
+                    title: const Text('Spouse'),
+                    subtitle: Text(
+                      _selectedSpouseId != null
+                          ? _getNameById(_selectedSpouseId) ?? 'Unknown'
+                          : 'Not selected',
+                    ),
+                    trailing: const Icon(Icons.arrow_forward_ios),
+                    onTap: _selectSpouse,
+                  ),
                   if (_selectedSpouseId != null)
                     Padding(
-                      padding: const EdgeInsets.only(bottom: 8),
-                      child: Text("Current Spouse: ${_getNameById(_selectedSpouseId) ?? 'Unknown'}"),
+                      padding: const EdgeInsets.only(left: 72, right: 16, bottom: 8),
+                      child: OutlinedButton(
+                        onPressed: () async {
+                          await _firestore
+                              .collection('families')
+                              .doc(widget.familyId)
+                              .collection('family_members')
+                              .doc(widget.userId)
+                              .update({'spouseId': FieldValue.delete()});
+                          setState(() {
+                            _selectedSpouseId = null;
+                          });
+                        },
+                        child: const Text('Remove Spouse'),
+                        style: OutlinedButton.styleFrom(
+                          foregroundColor: Colors.red,
+                          side: const BorderSide(color: Colors.red),
+                        ),
+                      ),
                     ),
-                  DropdownButtonFormField<String>(
-                    value: _selectedSpouseId,
-                    decoration: const InputDecoration(labelText: 'Select Spouse'),
-                    items: _availableSpouses
-                        .map((spouse) => DropdownMenuItem<String>(
-                      value: spouse['id'],
-                      child: Text(spouse['name']),
-                    ))
-                        .toList(),
-                    onChanged: (value) async {
-                      setState(() {
-                        _selectedSpouseId = value;
-                      });
-
-                      await _firestore
-                          .collection('families')
-                          .doc(widget.familyId)
-                          .collection('family_members')
-                          .doc(widget.userId)
-                          .update({'spouseId': value});
-                    },
-                  ),
                 ],
               ),
             _buildInfoTile(Icons.person, 'Full Name', fullName, () => _showEditDialog('Full Name', 'fullName', fullName)),
@@ -674,59 +970,298 @@ class _FamilyProfilePageState extends State<FamilyProfilePage> {
   }
 }
 
-class LocationPickerMap extends StatefulWidget {
-  final LatLng initialLocation;
+// New LocationPickerDialog widget
+class LocationPickerDialog extends StatefulWidget {
+  final LatLng currentLocation;
+  final List<LatLng> previousLocations;
+  final bool hasLocationPermission;
 
-  const LocationPickerMap({super.key, required this.initialLocation});
+  const LocationPickerDialog({
+    super.key,
+    required this.currentLocation,
+    required this.previousLocations,
+    this.hasLocationPermission = false,
+  });
 
   @override
-  _LocationPickerMapState createState() => _LocationPickerMapState();
+  _LocationPickerDialogState createState() => _LocationPickerDialogState();
 }
 
-class _LocationPickerMapState extends State<LocationPickerMap> {
-  late LatLng selectedLocation;
+class _LocationPickerDialogState extends State<LocationPickerDialog> {
+  late LatLng _selectedLocation;
+  bool _loadingCurrentLocation = false;
+  Set<Marker> _markers = {};
+  GoogleMapController? _mapController;
+  BitmapDescriptor? _selectedMarkerIcon;
 
   @override
   void initState() {
     super.initState();
-    selectedLocation = widget.initialLocation;
+    _selectedLocation = widget.currentLocation;
+    _loadMarkerIcons().then((_) => _updateMarkers());
+  }
+
+  Future<void> _loadMarkerIcons() async {
+    _selectedMarkerIcon = BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueRed);
+  }
+
+  @override
+  void dispose() {
+    _mapController?.dispose();
+    super.dispose();
+  }
+
+  void _updateMarkers() {
+    final markers = <Marker>{};
+
+    // Add marker for selected location
+    markers.add(
+      Marker(
+        markerId: const MarkerId("selected"),
+        position: _selectedLocation,
+        icon: _selectedMarkerIcon ?? BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueRed),
+        infoWindow: const InfoWindow(title: "Selected Location"),
+        zIndex: 2,
+      ),
+    );
+
+    // Add markers for previous locations
+    for (var i = 0; i < widget.previousLocations.length; i++) {
+      final loc = widget.previousLocations[i];
+      markers.add(
+        Marker(
+          markerId: MarkerId("history_$i"),
+          position: loc,
+          icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueBlue),
+          infoWindow: InfoWindow(title: "Previous Location ${i + 1}"),
+          zIndex: 1,
+        ),
+      );
+    }
+
+    setState(() {
+      _markers = markers;
+    });
+  }
+
+  Future<void> _getCurrentLocation() async {
+    setState(() => _loadingCurrentLocation = true);
+
+    try {
+      final position = await Geolocator.getCurrentPosition(
+          desiredAccuracy: LocationAccuracy.high
+      );
+
+      setState(() {
+        _selectedLocation = LatLng(position.latitude, position.longitude);
+        _updateMarkers();
+      });
+
+      await _mapController?.animateCamera(
+        CameraUpdate.newLatLngZoom(_selectedLocation, 16),
+        duration: const Duration(milliseconds: 700),
+      );
+    } catch (e) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Location error: ${e.toString()}')),
+      );
+    } finally {
+      setState(() => _loadingCurrentLocation = false);
+    }
   }
 
   @override
   Widget build(BuildContext context) {
     return Dialog(
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15)),
-      child: SizedBox(
-        width: 300,
-        height: 400,
+      insetPadding: const EdgeInsets.all(16),
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: ConstrainedBox(
+        constraints: BoxConstraints(
+          maxHeight: MediaQuery.of(context).size.height * 0.85,
+        ),
         child: Column(
+          mainAxisSize: MainAxisSize.min,
           children: [
-            Expanded(
-              child: ClipRRect(
-                borderRadius: BorderRadius.vertical(top: Radius.circular(15)),
-                child: GoogleMap(
-                  initialCameraPosition: CameraPosition(
-                    target: selectedLocation,
-                    zoom: 15,
+            // Header
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+              child: Row(
+                children: [
+                  Text(
+                    'Select Location',
+                    style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                      fontWeight: FontWeight.bold,
+                    ),
                   ),
-                  onTap: (LatLng pos) {
-                    setState(() => selectedLocation = pos);
-                  },
-                  markers: {
-                    Marker(markerId: MarkerId("selected"), position: selectedLocation),
-                  },
+                  const Spacer(),
+                  IconButton(
+                    icon: const Icon(Icons.close),
+                    onPressed: () => Navigator.pop(context),
+                  ),
+                ],
+              ),
+            ),
+
+            // Map with Current Location Button
+            Flexible(
+              flex: 3,
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(8),
+                child: Stack(
+                  children: [
+                    SizedBox(
+                      height: 300,
+                      child: GoogleMap(
+                        initialCameraPosition: CameraPosition(
+                          target: _selectedLocation,
+                          zoom: 15,
+                        ),
+                        onMapCreated: (controller) {
+                          _mapController = controller;
+                          _mapController!.animateCamera(
+                            CameraUpdate.newLatLngZoom(_selectedLocation, 15),
+                          );
+                          _updateMarkers(); // Call this after map is created
+                        },
+                        markers: _markers,
+                        myLocationEnabled: true,
+                        myLocationButtonEnabled: false,
+                        zoomControlsEnabled: false,
+                        onTap: (pos) {
+                          setState(() {
+                            _selectedLocation = pos;
+                            _updateMarkers();
+                          });
+                        },
+                      ),
+                    ),
+                    Positioned(
+                      bottom: 20,
+                      right: 20,
+                      child: FloatingActionButton(
+                        mini: true,
+                        heroTag: 'currentLocationFAB',
+                        backgroundColor: Colors.white,
+                        onPressed: _getCurrentLocation,
+                        child: _loadingCurrentLocation
+                            ? const CircularProgressIndicator(strokeWidth: 2)
+                            : const Icon(Icons.my_location, color: Colors.blue),
+                      ),
+                    ),
+                  ],
                 ),
               ),
             ),
+
+            // Location Coordinates Display
             Padding(
-              padding: const EdgeInsets.all(8.0),
-              child: ElevatedButton(
-                onPressed: () {
-                  Navigator.pop(context, selectedLocation);
-                },
-                child: Text("Confirm Location"),
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+              child: Row(
+                children: [
+                  const Icon(Icons.location_pin, size: 18, color: Colors.red),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      'Lat: ${_selectedLocation.latitude.toStringAsFixed(6)}\n'
+                          'Lng: ${_selectedLocation.longitude.toStringAsFixed(6)}',
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                  ),
+                ],
               ),
-            )
+            ),
+
+            // Location History List
+            if (widget.previousLocations.isNotEmpty) ...[
+              const Divider(height: 1),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
+                child: Row(
+                  children: [
+                    const Icon(Icons.history, size: 18),
+                    const SizedBox(width: 8),
+                    Text(
+                      'Previous Locations',
+                      style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              Flexible(
+                flex: 2,
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 8),
+                  child: ListView.builder(
+                    shrinkWrap: true,
+                    physics: const BouncingScrollPhysics(),
+                    itemCount: widget.previousLocations.length,
+                    itemBuilder: (context, index) {
+                      final loc = widget.previousLocations[index];
+                      final isSelected = _selectedLocation == loc;
+
+                      return Card(
+                        margin: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(8),
+                          side: isSelected
+                              ? BorderSide(color: Theme.of(context).primaryColor)
+                              : BorderSide.none,
+                        ),
+                        child: ListTile(
+                          dense: true,
+                          leading: Icon(
+                            isSelected ? Icons.location_on : Icons.location_on_outlined,
+                            color: isSelected ? Colors.red : Colors.grey,
+                          ),
+                          title: Text(
+                            'Location ${index + 1}',
+                            style: TextStyle(
+                              fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
+                            ),
+                          ),
+                          subtitle: Text(
+                            '${loc.latitude.toStringAsFixed(6)}, ${loc.longitude.toStringAsFixed(6)}',
+                          ),
+                          trailing: const Icon(Icons.arrow_forward_ios, size: 16),
+                          onTap: () {
+                            setState(() {
+                              _selectedLocation = loc;
+                              _updateMarkers();
+                            });
+                            _mapController?.animateCamera(
+                              CameraUpdate.newLatLngZoom(loc, 16),
+                              duration: const Duration(milliseconds: 500),
+                            );
+                          },
+                        ),
+                      );
+                    },
+                  ),
+                ),
+              ),
+            ],
+
+            // Confirm Button
+            Padding(
+              padding: const EdgeInsets.all(16),
+              child: SizedBox(
+                width: double.infinity,
+                child: ElevatedButton(
+                  style: ElevatedButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(vertical: 16),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                  ),
+                  onPressed: () => Navigator.pop(context, _selectedLocation),
+                  child: const Text('CONFIRM LOCATION'),
+                ),
+              ),
+            ),
           ],
         ),
       ),

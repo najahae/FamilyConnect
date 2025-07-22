@@ -5,6 +5,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
+import 'package:dropdown_search/dropdown_search.dart';
 
 
 class SignUpScreen extends StatefulWidget {
@@ -28,6 +29,9 @@ class _SignUpScreenState extends State<SignUpScreen> {
   String? _familyID;
   String? _errorMessage;
   String _userType = "Moderator";
+  String _spouseSearchQuery = '';
+  String _fatherSearchQuery = '';
+  String _motherSearchQuery = '';
 
   LatLng? _pickedLocation;
   CameraPosition? _initialCameraPosition;
@@ -50,9 +54,11 @@ class _SignUpScreenState extends State<SignUpScreen> {
     super.initState();
     _fetchExistingMembers();
     _familyIdController.addListener(() {
-      setState(() {
-        _isFamilyIdValid = false;
-      });
+      if (_familyIdController.text.trim() != _familyID) {
+        setState(() {
+          _isFamilyIdValid = false;
+        });
+      }
     });
     _setInitialLocation();
   }
@@ -85,7 +91,11 @@ class _SignUpScreenState extends State<SignUpScreen> {
       } else {
         setState(() {
           _members = snapshot.docs
-              .map((doc) => {'id': doc.id, 'name': doc['fullName'].toString()})
+              .map((doc) => {
+            'id': doc.id,
+            'name': doc['fullName'].toString(),
+            'gender': doc['gender'].toString(), // Add this line
+          })
               .toList();
         });
       }
@@ -140,6 +150,31 @@ class _SignUpScreenState extends State<SignUpScreen> {
       })
           .toList();
     });
+  }
+
+  List<Map<String, dynamic>> get filteredSpouses {
+    return _availableSpouses
+        .where((spouse) =>
+        spouse['name'].toLowerCase().contains(_spouseSearchQuery.toLowerCase()))
+        .toList();
+  }
+
+  List<Map<String, String>> get filteredFathers {
+    return _members
+        .where((member) {
+      final name = member['name'] ?? '';
+      return name.toLowerCase().contains(_fatherSearchQuery.toLowerCase());
+    })
+        .toList();
+  }
+
+  List<Map<String, String>> get filteredMothers {
+    return _members
+        .where((member) {
+      final name = member['name'] ?? '';
+      return name.toLowerCase().contains(_motherSearchQuery.toLowerCase());
+    })
+        .toList();
   }
 
   void _showFamilyIdInfo() {
@@ -522,90 +557,163 @@ class _SignUpScreenState extends State<SignUpScreen> {
                           ),
                         ),
                       ),
-                        Row(
-                          children: [
-                            Checkbox(
-                              value: _hasSpouse,
-                              onChanged: (value) {
-                                setState(() {
-                                  _hasSpouse = value ?? false;
-                                });
-                                if (_hasSpouse) {
-                                  // Call this with the selected gender and familyId (must be filled)
-                                  _loadSpouseOptions(_familyIdController.text.trim(), _selectedGender ?? '');
-                                }
-                              },
-                            ),
-                            const Text("Do you have a spouse?"),
-                          ],
-                        ),
-
-                        if (_hasSpouse)
-                          DropdownButtonFormField<String>(
-                            value: _selectedSpouseId,
-                            decoration: const InputDecoration(labelText: 'Select Spouse'),
-                            items: _availableSpouses
-                                .map((spouse) => DropdownMenuItem<String>(
-                              value: spouse['id'],
-                              child: Text(spouse['name']),
-                            ))
-                                .toList(),
+                      Row(
+                        children: [
+                          Checkbox(
+                            value: _hasSpouse,
                             onChanged: (value) {
                               setState(() {
-                                _selectedSpouseId = value;
+                                _hasSpouse = value ?? false;
+                              });
+                              if (_hasSpouse) {
+                                // Call this with the selected gender and familyId (must be filled)
+                                _loadSpouseOptions(_familyIdController.text.trim(), _selectedGender ?? '');
+                              }
+                             },
+                            ),
+                            const Text("Do you have a spouse?"),
+                        ],
+                      ),
+                        if (_hasSpouse)
+                          DropdownSearch<Map<String, dynamic>>(
+                            items: _availableSpouses,
+                            selectedItem: _availableSpouses.firstWhere(
+                                  (s) => s['id'] == _selectedSpouseId,
+                              orElse: () => {'id': '', 'name': 'Select Spouse'},
+                            ),
+                            onChanged: (value) {
+                              setState(() {
+                                _selectedSpouseId = value?['id'];
                               });
                             },
+                            itemAsString: (item) => item['name'] ?? '',
+                            dropdownBuilder: (context, selectedItem) {
+                              return Text(selectedItem?['name'] ?? 'Select Spouse');
+                            },
+                            popupProps: PopupProps.menu(
+                              showSearchBox: true,
+                              itemBuilder: (context, item, isSelected) {
+                                return ListTile(
+                                  title: Text(item['name'] ?? ''),
+                                );
+                              },
+                              searchFieldProps: TextFieldProps(
+                                decoration: InputDecoration(
+                                  hintText: "Search spouse...",
+                                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+                                ),
+                              ),
+                            ),
+                            dropdownDecoratorProps: DropDownDecoratorProps(
+                              dropdownSearchDecoration: InputDecoration(
+                                labelText: 'Select Spouse',
+                                border: OutlineInputBorder(borderRadius: BorderRadius.circular(20)),
+                                focusedBorder: OutlineInputBorder(
+                                  borderSide: BorderSide(color: Colors.brown, width: 2),
+                                  borderRadius: BorderRadius.circular(20),
+                                ),
+                                floatingLabelStyle: TextStyle(
+                                  color: Colors.black,
+                                ),
+                              ),
+                            ),
                           ),
-
+                        SizedBox(height: 16),
                         Padding(
-                        padding: const EdgeInsets.only(bottom: 10),
-                        child: DropdownButtonFormField<String>(
-                          value: _fatherIdController.text.isNotEmpty ? _fatherIdController.text : null,
-                          onChanged: (value) => setState(() => _fatherIdController.text = value ?? ''),
-                          items: _members.map((member) => DropdownMenuItem<String>(
-                            value: member['id'],
-                            child: Text(member['name']!),
-                          )).toList(),
-                          decoration: InputDecoration(
-                            labelText: "Father",
-                            border: OutlineInputBorder(
-                              borderRadius: BorderRadius.circular(20),
+                          padding: const EdgeInsets.only(bottom: 10),
+                          child: DropdownSearch<Map<String, dynamic>>(
+                            items: [
+                              {'id': '', 'name': 'None', 'gender': ''},
+                              ..._members.where((m) => m['gender'] == 'Male')
+                            ],
+                            selectedItem: _members.firstWhere(
+                                  (m) => m['id'] == _fatherIdController.text,
+                              orElse: () => {'id': '', 'name': 'Select Father', 'gender': ''},
                             ),
-                            focusedBorder: OutlineInputBorder(
-                              borderSide: BorderSide(color: Colors.brown, width: 2),
-                              borderRadius: BorderRadius.circular(20),
+                            onChanged: (value) {
+                              setState(() {
+                                _fatherIdController.text = value?['id'] ?? '';
+                              });
+                            },
+                            itemAsString: (item) => item['name'] ?? '',
+                            dropdownBuilder: (context, selectedItem) {
+                              return Text(selectedItem?['name'] ?? 'Select Father');
+                            },
+                            popupProps: PopupProps.menu(
+                              showSearchBox: true,
+                              itemBuilder: (context, item, isSelected) {
+                                return ListTile(
+                                  title: Text(item['name'] ?? ''),
+                                );
+                              },
+                              searchFieldProps: TextFieldProps(
+                                decoration: InputDecoration(
+                                  hintText: "Search father...",
+                                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+                                ),
+                              ),
                             ),
-                            floatingLabelStyle: TextStyle(
-                              color: Colors.black,
+                            dropdownDecoratorProps: DropDownDecoratorProps(
+                              dropdownSearchDecoration: InputDecoration(
+                                labelText: "Father",
+                                border: OutlineInputBorder(borderRadius: BorderRadius.circular(20)),
+                                focusedBorder: OutlineInputBorder(
+                                  borderSide: BorderSide(color: Colors.brown, width: 2),
+                                  borderRadius: BorderRadius.circular(20),
+                                ),
+                                floatingLabelStyle: TextStyle(color: Colors.black),
+                              ),
                             ),
                           ),
                         ),
-                      ),
-                      Padding(
-                        padding: const EdgeInsets.only(bottom: 10),
-                        child: DropdownButtonFormField<String>(
-                          value: _motherIdController.text.isNotEmpty ? _motherIdController.text : null,
-                          onChanged: (value) => setState(() => _motherIdController.text = value ?? ''),
-                          items: _members.map((member) => DropdownMenuItem<String>(
-                            value: member['id'],
-                            child: Text(member['name']!),
-                          )).toList(),
-                          decoration: InputDecoration(
-                            labelText: "Mother",
-                            border: OutlineInputBorder(
-                              borderRadius: BorderRadius.circular(20),
+                        Padding(
+                          padding: const EdgeInsets.only(bottom: 10),
+                          child: DropdownSearch<Map<String, dynamic>>(
+                            items: [
+                              {'id': '', 'name': 'None', 'gender': ''},
+                              ..._members.where((m) => m['gender'] == 'Female')
+                            ],
+                            selectedItem: _members.firstWhere(
+                                  (m) => m['id'] == _motherIdController.text,
+                              orElse: () => {'id': '', 'name': 'Select Mother', 'gender': ''},
                             ),
-                            focusedBorder: OutlineInputBorder(
-                              borderSide: BorderSide(color: Colors.brown, width: 2),
-                              borderRadius: BorderRadius.circular(20),
+                            onChanged: (value) {
+                              setState(() {
+                                _motherIdController.text = value?['id'] ?? '';
+                              });
+                            },
+                            itemAsString: (item) => item['name'] ?? '',
+                            dropdownBuilder: (context, selectedItem) {
+                              return Text(selectedItem?['name'] ?? 'Select Mother');
+                            },
+                            popupProps: PopupProps.menu(
+                              showSearchBox: true,
+                              itemBuilder: (context, item, isSelected) {
+                                return ListTile(
+                                  title: Text(item['name'] ?? ''),
+                                );
+                              },
+                              searchFieldProps: TextFieldProps(
+                                decoration: InputDecoration(
+                                  hintText: "Search mother...",
+                                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+                                ),
+                              ),
                             ),
-                            floatingLabelStyle: TextStyle(
-                              color: Colors.black,
+                            dropdownDecoratorProps: DropDownDecoratorProps(
+                              dropdownSearchDecoration: InputDecoration(
+                                labelText: "Mother",
+                                border: OutlineInputBorder(borderRadius: BorderRadius.circular(20)),
+                                focusedBorder: OutlineInputBorder(
+                                  borderSide: BorderSide(color: Colors.brown, width: 2),
+                                  borderRadius: BorderRadius.circular(20),
+                                ),
+                                floatingLabelStyle: TextStyle(color: Colors.black),
+                              ),
                             ),
                           ),
                         ),
-                      ),
-                      _buildTextField(_birthDateController, "Birth Date",
+                        _buildTextField(_birthDateController, "Birth Date",
                           readOnly: true,
                           onTap: _selectBirthDate,
                           suffixIcon: Icon(Icons.calendar_today)),

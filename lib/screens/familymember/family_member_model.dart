@@ -8,6 +8,7 @@ class FamilyMember {
   final String? motherId;
   final bool isInLaw;
   final String? spouseId;
+  final String? profileImageUrl;
 
 
   FamilyMember({
@@ -20,6 +21,7 @@ class FamilyMember {
     this.motherId,
     this.isInLaw = false,
     this.spouseId,
+    this.profileImageUrl,
   });
 
   factory FamilyMember.fromMap(String id, Map<String, dynamic> data) {
@@ -33,6 +35,7 @@ class FamilyMember {
       motherId: data['motherId'],
       isInLaw: data['isInLaw'] ?? false,
       spouseId: data['spouseId'],
+      profileImageUrl: data['profileImageUrl'],
     );
   }
 

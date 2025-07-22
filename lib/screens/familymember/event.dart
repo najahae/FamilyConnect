@@ -17,16 +17,48 @@ class EventPage extends StatefulWidget {
   State<EventPage> createState() => _EventPageState();
 }
 
-class _EventPageState extends State<EventPage> {
+class _EventPageState extends State<EventPage> with SingleTickerProviderStateMixin {
   DateTime _selectedDay = DateTime.now();
   List<DocumentSnapshot> _events = [];
   Set<DateTime> _markedEventDates = {};
+  late TabController _tabController;
+  List<DocumentSnapshot> _allEvents = []; // For storing all events for the family
 
   @override
   void initState() {
     super.initState();
+    _tabController = TabController(length: 3, vsync: this);
+    _fetchAllEvents();
     _fetchEventsForSelectedDay();
     _fetchMarkedDates(_selectedDay);
+  }
+
+  @override
+  void dispose() {
+    _tabController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _fetchAllEvents() async {
+    final currentUserId = FirebaseAuth.instance.currentUser?.uid;
+    if (currentUserId == null) return;
+
+    final isModerator = widget.role == 'moderator';
+
+    final snapshot = await FirebaseFirestore.instance
+        .collection('families')
+        .doc(widget.familyID)
+        .collection('events')
+        .orderBy('date')
+        .get();
+
+    setState(() {
+      _allEvents = snapshot.docs.where((doc) {
+        if (isModerator) return true;
+        final invitedIds = doc.data()['invitedMemberIds'] as List<dynamic>?;
+        return invitedIds == null || invitedIds.contains(currentUserId);
+      }).toList();
+    });
   }
 
   Future<void> _fetchEventsForSelectedDay() async {
@@ -80,6 +112,62 @@ class _EventPageState extends State<EventPage> {
     setState(() {
       _markedEventDates = dates;
     });
+  }
+
+  // Helper method to categorize events
+  List<DocumentSnapshot> _getEventsByCategory(String category) {
+    final now = DateTime.now();
+    final today = DateFormat('yyyy-MM-dd').format(now);
+
+    return _allEvents.where((event) {
+      final eventDate = event['date'] as String;
+      final eventDateTime = DateFormat('yyyy-MM-dd').parse(eventDate);
+
+      if (category == 'history') {
+        return eventDate.compareTo(today) < 0;
+      } else if (category == 'ongoing') {
+        if (eventDate != today) return false;
+
+        // Check if current time is between start and end time
+        try {
+          final startTimeStr = event['startTime'] as String? ?? '';
+          final endTimeStr = event['endTime'] as String? ?? '';
+
+          if (startTimeStr.isEmpty || endTimeStr.isEmpty) return false;
+
+          final startTime = _parseTimeString(startTimeStr);
+          final endTime = _parseTimeString(endTimeStr);
+
+          final currentTime = TimeOfDay.fromDateTime(now);
+
+          return (currentTime.hour > startTime.hour ||
+              (currentTime.hour == startTime.hour && currentTime.minute >= startTime.minute)) &&
+              (currentTime.hour < endTime.hour ||
+                  (currentTime.hour == endTime.hour && currentTime.minute <= endTime.minute));
+        } catch (e) {
+          return false;
+        }
+      } else { // upcoming
+        return eventDate.compareTo(today) > 0 ||
+            (eventDate == today &&
+                (_parseTimeString(event['startTime'] as String? ?? '').hour > TimeOfDay.fromDateTime(now).hour ||
+                    (_parseTimeString(event['startTime'] as String? ?? '').hour == TimeOfDay.fromDateTime(now).hour &&
+                        _parseTimeString(event['startTime'] as String? ?? '').minute > TimeOfDay.fromDateTime(now).minute)));
+      }
+    }).toList();
+  }
+
+  TimeOfDay _parseTimeString(String timeStr) {
+    final parts = timeStr.split(' ');
+    final timePart = parts[0].split(':');
+    final hour = int.parse(timePart[0]);
+    final minute = int.parse(timePart[1]);
+    final isPM = parts.length > 1 && parts[1].toUpperCase() == 'PM';
+
+    return TimeOfDay(
+      hour: isPM && hour != 12 ? hour + 12 : hour == 12 && !isPM ? 0 : hour,
+      minute: minute,
+    );
   }
 
   Future<List<Map<String, String>>> _fetchFamilyMembers() async {
@@ -609,7 +697,7 @@ class _EventPageState extends State<EventPage> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: PreferredSize(
-        preferredSize: const Size.fromHeight(60),
+        preferredSize: const Size.fromHeight(100),
         child: ClipRRect(
           borderRadius: const BorderRadius.only(
             bottomLeft: Radius.circular(25),
@@ -620,131 +708,165 @@ class _EventPageState extends State<EventPage> {
             centerTitle: true,
             title: const Text("Event", style: TextStyle(fontWeight: FontWeight.bold)),
             automaticallyImplyLeading: false,
+            bottom: TabBar(
+              controller: _tabController,
+              tabs: const [
+                Tab(text: 'Calendar'),
+                Tab(text: 'History'),
+                Tab(text: 'Upcoming'),
+              ],
+            ),
           ),
         ),
       ),
-      floatingActionButton: FloatingActionButton(
+      floatingActionButton: _tabController.index == 0
+          ? FloatingActionButton(
         onPressed: _showAddEventDialog,
         child: const Icon(Icons.add),
-      ),
-      body: Column(
+      )
+          : null,
+      body: TabBarView(
+        controller: _tabController,
         children: [
-          TableCalendar(
-            firstDay: DateTime(2000),
-            lastDay: DateTime(2100),
-            focusedDay: _selectedDay,
-            availableCalendarFormats: const {
-              CalendarFormat.month: 'Month',
-            },
-            selectedDayPredicate: (day) => isSameDay(day, _selectedDay),
-            onDaySelected: (selectedDay, focusedDay) {
-              setState(() {
-                _selectedDay = selectedDay;
-              });
-              _fetchEventsForSelectedDay();
-            },
-            onPageChanged: (focusedDay) {
-              setState(() {
-                _selectedDay = focusedDay;
-              });
-              _fetchMarkedDates(focusedDay);
-              _fetchEventsForSelectedDay(); // Optional, if want to preload that day's events
-            },
-            calendarStyle: const CalendarStyle(
-              todayDecoration: BoxDecoration(
-                color: Colors.green,
-                shape: BoxShape.circle,
-              ),
-              selectedDecoration: BoxDecoration(
-                color: Colors.brown,
-                shape: BoxShape.circle,
-              ),
-            ),
-            calendarBuilders: CalendarBuilders(
-              markerBuilder: (context, date, events) {
-                if (_markedEventDates.contains(DateTime(date.year, date.month, date.day))) {
-                  return Positioned(
-                    bottom: 4,
-                    child: Container(
-                      width: 6,
-                      height: 6,
-                      decoration: const BoxDecoration(
-                        shape: BoxShape.circle,
-                        color: Colors.red,
-                      ),
-                    ),
-                  );
-                }
-                return null;
-              },
-            ),
-          ),
-          Expanded(
-            child: ListView.builder(
-              itemCount: _events.length,
-              itemBuilder: (context, index) {
-                final event = _events[index].data() as Map<String, dynamic>;
-                final canModify = _canModifyEvent(_events[index]);
-
-                return Card(
-                  margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                  elevation: 4,
-                  child: InkWell(
-                    onTap: () => _showEventDetailsDialog(_events[index]),
-                    child: Padding(
-                      padding: const EdgeInsets.all(12.0),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Row(
-                            children: [
-                              Expanded(
-                                child: Text(
-                                  event['title'] ?? 'Untitled',
-                                  style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-                                ),
-                              ),
-                              if (canModify) ...[
-                                IconButton(
-                                  icon: const Icon(Icons.edit, color: Colors.orange, size: 20),
-                                  onPressed: () => _showAddEventDialog(existingEvent: _events[index]),
-                                  tooltip: 'Edit Event',
-                                ),
-                                IconButton(
-                                  icon: const Icon(Icons.delete, color: Colors.red, size: 20),
-                                  onPressed: () => _confirmDeleteEvent(_events[index].id),
-                                  tooltip: 'Delete Event',
-                                ),
-                              ],
-                              if (_isLocationValidForDirections(event['location']))
-                                IconButton(
-                                  icon: const Icon(Icons.directions, color: Colors.blue, size: 20),
-                                  onPressed: () => _openGoogleMapsDirections(event['location']),
-                                  tooltip: 'Get Directions',
-                                ),
-                            ],
-                          ),
-                          const SizedBox(height: 8),
-                          Text(
-                            "🕒 From ${event['startTime']} to ${event['endTime']}",
-                            style: const TextStyle(fontSize: 14),
-                          ),
-                          const SizedBox(height: 8),
-                          if ((event['dressCodeMale'] ?? '').isNotEmpty)
-                            Text("👔 Male Dress Code: ${event['dressCodeMale']}"),
-                          if ((event['dressCodeFemale'] ?? '').isNotEmpty)
-                            Text("👗 Female Dress Code: ${event['dressCodeFemale']}"),
-                        ],
-                      ),
-                    ),
+          // Calendar Tab
+          Column(
+            children: [
+              TableCalendar(
+                firstDay: DateTime(2000),
+                lastDay: DateTime(2100),
+                focusedDay: _selectedDay,
+                availableCalendarFormats: const {
+                  CalendarFormat.month: 'Month',
+                },
+                selectedDayPredicate: (day) => isSameDay(day, _selectedDay),
+                onDaySelected: (selectedDay, focusedDay) {
+                  setState(() {
+                    _selectedDay = selectedDay;
+                  });
+                  _fetchEventsForSelectedDay();
+                },
+                onPageChanged: (focusedDay) {
+                  setState(() {
+                    _selectedDay = focusedDay;
+                  });
+                  _fetchMarkedDates(focusedDay);
+                  _fetchEventsForSelectedDay();
+                },
+                calendarStyle: const CalendarStyle(
+                  todayDecoration: BoxDecoration(
+                    color: Colors.green,
+                    shape: BoxShape.circle,
                   ),
-                );
-              },
-            ),
+                  selectedDecoration: BoxDecoration(
+                    color: Colors.brown,
+                    shape: BoxShape.circle,
+                  ),
+                ),
+                calendarBuilders: CalendarBuilders(
+                  markerBuilder: (context, date, events) {
+                    if (_markedEventDates.contains(DateTime(date.year, date.month, date.day))) {
+                      return Positioned(
+                        bottom: 4,
+                        child: Container(
+                          width: 6,
+                          height: 6,
+                          decoration: const BoxDecoration(
+                            shape: BoxShape.circle,
+                            color: Colors.red,
+                          ),
+                        ),
+                      );
+                    }
+                    return null;
+                  },
+                ),
+              ),
+              Expanded(
+                child: _buildEventList(_events),
+              ),
+            ],
           ),
+          // History Tab
+          _buildEventList(_getEventsByCategory('history')),
+          // Upcoming Tab
+          _buildEventList(_getEventsByCategory('upcoming')),
         ],
       ),
+    );
+  }
+
+  Widget _buildEventList(List<DocumentSnapshot> events) {
+    if (events.isEmpty) {
+      return const Center(
+        child: Text('No events found'),
+      );
+    }
+
+    return ListView.builder(
+      itemCount: events.length,
+      itemBuilder: (context, index) {
+        final event = events[index].data() as Map<String, dynamic>;
+        final canModify = _canModifyEvent(events[index]);
+
+        return Card(
+          margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+          elevation: 4,
+          child: InkWell(
+            onTap: () => _showEventDetailsDialog(events[index]),
+            child: Padding(
+              padding: const EdgeInsets.all(12.0),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          event['title'] ?? 'Untitled',
+                          style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                        ),
+                      ),
+                      if (canModify && _tabController.index == 0) ...[
+                        IconButton(
+                          icon: const Icon(Icons.edit, color: Colors.orange, size: 20),
+                          onPressed: () => _showAddEventDialog(existingEvent: events[index]),
+                          tooltip: 'Edit Event',
+                        ),
+                        IconButton(
+                          icon: const Icon(Icons.delete, color: Colors.red, size: 20),
+                          onPressed: () => _confirmDeleteEvent(events[index].id),
+                          tooltip: 'Delete Event',
+                        ),
+                      ],
+                      if (_isLocationValidForDirections(event['location']))
+                        IconButton(
+                          icon: const Icon(Icons.directions, color: Colors.blue, size: 20),
+                          onPressed: () => _openGoogleMapsDirections(event['location']),
+                          tooltip: 'Get Directions',
+                        ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    "📅 Date: ${event['date']}",
+                    style: const TextStyle(fontSize: 14),
+                  ),
+                  Text(
+                    "🕒 From ${event['startTime']} to ${event['endTime']}",
+                    style: const TextStyle(fontSize: 14),
+                  ),
+                  const SizedBox(height: 8),
+                  if ((event['dressCodeMale'] ?? '').isNotEmpty)
+                    Text("👔 Male Dress Code: ${event['dressCodeMale']}"),
+                  if ((event['dressCodeFemale'] ?? '').isNotEmpty)
+                    Text("👗 Female Dress Code: ${event['dressCodeFemale']}"),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
     );
   }
 }

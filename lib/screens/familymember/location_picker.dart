@@ -72,7 +72,7 @@ class _LocationPickerState extends State<LocationPicker> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text("Pick a Location")),
+      appBar: AppBar(title: const Text("Pick a Location"), backgroundColor: Colors.green[200],),
       body: _currentLocation == null
           ? const Center(child: CircularProgressIndicator())
           : Stack(

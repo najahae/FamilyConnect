@@ -16,40 +16,58 @@
 <script src="https://unpkg.com/leaflet.heat/dist/leaflet-heat.js"></script>
 
 <script>
-    const map = L.map('map').setView([3.1390, 101.6869], 7);
-
+    const map = L.map('map').setView([4.2105, 101.9758], 7);
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-      attribution: 'Map data © OpenStreetMap contributors'
+        attribution: 'Map data © OpenStreetMap contributors'
     }).addTo(map);
 
     let heatLayer;
 
-    function updateHeatmap(data) {
-      try {
-        const latlngs = JSON.parse(data);
-        console.log("Heatmap data received:", latlngs);
-        if (heatLayer) map.removeLayer(heatLayer);
-        heatLayer = L.heatLayer(latlngs, {
-  radius: 60,          // Bigger glow size
-  blur: 40,            // Softer blur
-  maxZoom: 17,
-  max: 0.7,            // Increases intensity
-  gradient: {
-    0.2: 'rgba(0, 255, 0, 0.5)',   // greenish low
-    0.4: 'rgba(255, 255, 0, 0.6)', // yellow
-    0.6: 'rgba(255, 140, 0, 0.7)', // orange
-    0.8: 'rgba(255, 0, 0, 0.9)',   // red
-    1.0: 'rgba(128, 0, 0, 1.0)'    // dark red
-  }
-}).addTo(map);
-      } catch (e) {
-        console.error("Failed to parse or render heatmap data", e);
-      }
-    }
-
-    window.addEventListener("message", (event) => {
-      updateHeatmap(event.data);
+    // Add this event listener to receive messages from Flutter
+    window.addEventListener('message', function(event) {
+        // Verify the data is what we expect
+        if (typeof event.data === 'string') {
+            updateHeatmap(event.data);
+        }
     });
+
+    function updateHeatmap(data) {
+        try {
+            const coords = JSON.parse(data);
+            console.log("Heatmap data received:", coords);
+
+            // Convert to format [lat, lng, intensity] with default intensity 1
+            const heatData = coords.map(coord => [coord[0], coord[1], 1]);
+
+            if (heatLayer) {
+                map.removeLayer(heatLayer);
+            }
+
+            heatLayer = L.heatLayer(heatData, {
+                radius: 25,
+                blur: 15,
+                maxZoom: 17,
+                minOpacity: 0.5,
+                max: 1.0,
+                gradient: {
+                    0.4: 'blue',
+                    0.6: 'cyan',
+                    0.7: 'lime',
+                    0.8: 'yellow',
+                    1.0: 'red'
+                }
+            }).addTo(map);
+
+            // Optionally fit the map to the heatmap bounds
+            if (coords.length > 0) {
+                const points = coords.map(c => L.latLng(c[0], c[1]));
+                map.fitBounds(L.latLngBounds(points).pad(0.1));
+            }
+
+        } catch (e) {
+            console.error("Failed to parse or render heatmap data", e);
+        }
+    }
 </script>
 </body>
 </html>

@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
+import 'package:geocoding/geocoding.dart';
 
 class FamilyMapPage extends StatefulWidget {
   final String familyID;
@@ -86,33 +87,102 @@ class _FamilyMapPageState extends State<FamilyMapPage> {
   }
 
 
-  void _showMemberList(List<FamilyMemberLocation> members) {
+  void _showMemberList(List<FamilyMemberLocation> members) async {
+    if (members.isEmpty) return;
+
+    final member = members[0];
+    String address = "Loading address...";
+
+    try {
+      final placemarks = await placemarkFromCoordinates(member.lat, member.lng);
+      if (placemarks.isNotEmpty) {
+        final place = placemarks.first;
+        address = [
+          if (place.street != null) place.street,
+          if (place.locality != null) place.locality,
+          if (place.postalCode != null) place.postalCode,
+          if (place.country != null) place.country,
+        ].where((part) => part != null).join(', ');
+      }
+    } catch (e) {
+      address = "Location: ${member.lat.toStringAsFixed(4)}, ${member.lng.toStringAsFixed(4)}";
+      debugPrint("Geocoding failed: $e");
+    }
+
     showModalBottomSheet(
       context: context,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(25)),
-      ),
+      isScrollControlled: true,
       builder: (context) => Padding(
         padding: const EdgeInsets.all(16),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Container(width: 50, height: 5, decoration: BoxDecoration(color: Colors.grey[400], borderRadius: BorderRadius.circular(10))),
-            const SizedBox(height: 10),
-            Text("Location: ${members[0].address}", style: const TextStyle(fontWeight: FontWeight.bold)),
-            const SizedBox(height: 10),
-            ...members.map((m) => ListTile(
-              leading: CircleAvatar(
-                backgroundColor: Colors.grey,
-                child: Text(m.initials),
+            // Drag handle
+            Center(
+              child: Container(
+                width: 50,
+                height: 4,
+                margin: const EdgeInsets.only(bottom: 12),
+                decoration: BoxDecoration(
+                  color: Colors.grey[400],
+                  borderRadius: BorderRadius.circular(2),
+                ),
               ),
-              title: Text(m.fullName),
-              subtitle: Text(m.address),
-            )),
+            ),
+
+            // Location section
+            Text(
+              address,
+              style: const TextStyle(
+                fontSize: 16,
+                fontWeight: FontWeight.w500,
+              ),
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 16),
+
+            // Members list
+            ConstrainedBox(
+              constraints: BoxConstraints(
+                maxHeight: MediaQuery.of(context).size.height * 0.6,
+              ),
+              child: ListView.builder(
+                shrinkWrap: true,
+                itemCount: members.length,
+                itemBuilder: (context, index) {
+                  final member = members[index];
+                  return ListTile(
+                    leading: CircleAvatar(
+                      backgroundColor: _getGenderColor(member.gender),
+                      child: Text(
+                        member.initials,
+                        style: const TextStyle(color: Colors.white),
+                      ),
+                    ),
+                    title: Text(member.fullName),
+                    subtitle: Text(_formatGender(member.gender)),
+                  );
+                },
+              ),
+            ),
           ],
         ),
       ),
     );
+  }
+
+// Helper methods
+  Color _getGenderColor(String gender) {
+    switch (gender.toLowerCase()) {
+      case 'male': return Colors.blue;
+      case 'female': return Colors.pink;
+      default: return Colors.grey;
+    }
+  }
+
+  String _formatGender(String gender) {
+    if (gender.isEmpty) return 'Unknown';
+    return '${gender[0].toUpperCase()}${gender.substring(1).toLowerCase()}';
   }
 
   double _calculateBubbleRadius(int count) {
@@ -233,5 +303,12 @@ class FamilyMemberLocation {
     final parts = fullName.trim().split(" ");
     if (parts.length == 1) return parts[0][0];
     return parts[0][0] + parts.last[0];
+  }
+}
+
+extension StringExtensions on String {
+  String capitalize() {
+    if (isEmpty) return this;
+    return '${this[0].toUpperCase()}${substring(1).toLowerCase()}';
   }
 }

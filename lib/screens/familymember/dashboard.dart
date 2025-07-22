@@ -59,10 +59,69 @@ class _FamilyMemberDashboardState extends State<FamilyMemberDashboard> {
             familyID = doc.id;
             username = member.data()?['fullName'] ?? user.email;
           });
+
+          // 👇 Check for moderator invite here
+          final invited = member.data()?['invitedToBeModerator'] == true;
+          if (invited) {
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              _showModeratorInviteDialog(doc.id, user.uid, member.data()!);
+            });
+          }
+
           break;
         }
       }
     }
+  }
+
+  void _showModeratorInviteDialog(String familyId, String userId, Map<String, dynamic> userData) {
+    showDialog(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: Text('Moderator Invitation'),
+        content: Text('You have been invited to become a moderator. Accept?'),
+        actions: [
+          TextButton(
+            child: Text('Reject'),
+            onPressed: () async {
+              await FirebaseFirestore.instance
+                  .collection('families')
+                  .doc(familyId)
+                  .collection('family_members')
+                  .doc(userId)
+                  .update({'invitedToBeModerator': false});
+              Navigator.pop(context);
+            },
+          ),
+          ElevatedButton(
+            child: Text('Accept'),
+            onPressed: () async {
+              await FirebaseFirestore.instance
+                  .collection('families')
+                  .doc(familyId)
+                  .collection('family_members')
+                  .doc(userId)
+                  .update({
+                'isModerator': true,
+                'invitedToBeModerator': false,
+              });
+
+              await FirebaseFirestore.instance
+                  .collection('families')
+                  .doc(familyId)
+                  .collection('moderators')
+                  .doc(userId)
+                  .set(userData);
+
+              Navigator.pop(context);
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(content: Text('You are now a moderator!')),
+              );
+            },
+          ),
+        ],
+      ),
+    );
   }
 
   void _logout() async {

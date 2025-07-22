@@ -25,7 +25,7 @@
         }
         .modal-content {
           background-color: #fff;
-          margin: 30% auto;
+          margin: 15% auto 5% auto;
           padding: 20px;
           border-radius: 16px;
           width: 85%;
@@ -82,28 +82,36 @@
             border: 1px solid #ccc;
             border-radius: 6px;
             background-color: #fff;
-            appearance: auto; /* ensures native dropdown UI */
+            appearance: auto;
             z-index: 1000;
         }
-
+        .profile-pic {
+            width: 90px;
+            height: 90px;
+            border-radius: 50%;
+            object-fit: cover;
+            margin: 0 auto 15px auto;
+            display: block;
+            box-shadow: 0 2px 6px rgba(0, 0, 0, 0.15);
+        }
     </style>
 </head>
 <body>
 
 <div id="cy"></div>
 
-<!-- 💬 Modal -->
 <div id="infoModal" class="modal">
     <div class="modal-content">
         <span class="close-button" onclick="closeModal()">&times;</span>
+        <img id="modal-profile-pic" class="profile-pic" src="" alt="Profile Picture">
         <h3 id="modal-name"></h3>
+        <p><strong>Gender:</strong> <span id="modal-gender"></span></p>
         <p><strong>Nickname:</strong> <span id="modal-nickname"></span></p>
         <p><strong>Birthdate:</strong> <span id="modal-birthdate"></span></p>
         <div id="editSection"></div>
     </div>
 </div>
 
-<!-- Custom Delete Modal -->
 <div id="deleteModal" class="modal">
     <div class="modal-content">
         <h3>Confirm Deletion</h3>
@@ -113,17 +121,13 @@
     </div>
 </div>
 
-
 <script>
     let currentNodeData = null;
     let isEditing = false;
     let allMembers = [];
 
     function closeModal() {
-      const modal = document.getElementById('infoModal');
-      if (modal) modal.style.display = 'none';
-
-      // Reset any inputs if necessary
+      document.getElementById('infoModal').style.display = 'none';
       if (currentNodeData) {
         const nicknameInput = document.getElementById('modal-nickname');
         const birthdateInput = document.getElementById('modal-birthdate');
@@ -134,7 +138,6 @@
             textContent: currentNodeData.nickname || '-'
           }));
         }
-
         if (birthdateInput && birthdateInput.tagName === 'INPUT') {
           birthdateInput.replaceWith(Object.assign(document.createElement('span'), {
             id: 'modal-birthdate',
@@ -142,7 +145,6 @@
           }));
         }
       }
-
       isEditing = false;
     }
 
@@ -179,7 +181,7 @@
           nickname: nicknameInput.value,
           birthDate: birthdateInput.value
         };
-       FlutterChannel.postMessage(JSON.stringify({ type: 'updateMember', payload: updated }));
+        FlutterChannel.postMessage(JSON.stringify({ type: 'updateMember', payload: updated }));
         closeModal();
       }));
       editSection.appendChild(createButton('Cancel', 'cancel-button', () => {
@@ -189,70 +191,50 @@
     }
 
     function showModal(data) {
-  const name = document.getElementById('modal-name');
-  const editSection = document.getElementById('editSection');
+      document.getElementById('modal-name').innerText = data.fullName || 'Unknown';
+      document.getElementById('modal-gender').textContent = data.gender || '-';
+      document.getElementById('modal-nickname').textContent = data.nickname || '-';
+      document.getElementById('modal-birthdate').textContent = data.birthDate || '-';
+      document.getElementById('modal-profile-pic').src = data.profileImageUrl || 'user.png';
+      const profileImg = document.getElementById('modal-profile-pic');
+      profileImg.onerror = () => profileImg.src = 'user.png';
+      console.log("Profile Image URL:", data.profileImageUrl);
+      document.getElementById('editSection').innerHTML = '';
 
-  name.innerText = data.fullName || 'Unknown';
-  editSection.innerHTML = '';
-
-  // Force rebuild nickname and birthdate elements as span
-  const nicknameContainer = document.createElement('span');
-  nicknameContainer.id = 'modal-nickname';
-  nicknameContainer.textContent = data.nickname || '-';
-
-  const birthdateContainer = document.createElement('span');
-  birthdateContainer.id = 'modal-birthdate';
-  birthdateContainer.textContent = data.birthDate || '-';
-
-  // Replace any existing elements
-  const oldNickname = document.getElementById('modal-nickname');
-  const oldBirthdate = document.getElementById('modal-birthdate');
-  if (oldNickname) oldNickname.replaceWith(nicknameContainer);
-  if (oldBirthdate) oldBirthdate.replaceWith(birthdateContainer);
-
-  if (window.userRole === 'moderator') {
-    editSection.appendChild(createButton('Edit Info', 'edit-button', () => enableEdit(data)));
-    editSection.appendChild(createButton('Delete Member', 'delete-button', () => {
-      openDeleteModal(data.fullName, data.id);
-    }));
-  }
-
-  document.getElementById('infoModal').style.display = 'block';
-}
+      if (window.userRole === 'moderator') {
+        editSection.appendChild(createButton('Edit Info', 'edit-button', () => enableEdit(data)));
+        editSection.appendChild(createButton('Delete Member', 'delete-button', () => {
+          openDeleteModal(data.fullName, data.id);
+        }));
+      }
+      document.getElementById('infoModal').style.display = 'block';
+    }
 
     function openDeleteModal(name, memberId) {
-  const modal = document.getElementById('deleteModal');
-  const text = document.getElementById('deleteText');
-  text.innerText = `Are you sure you want to delete ${name}?`;
+      const modal = document.getElementById('deleteModal');
+      document.getElementById('deleteText').innerText = `Are you sure you want to delete ${name}?`;
+      modal.dataset.memberId = memberId;
+      modal.style.display = 'block';
+    }
 
-  modal.dataset.memberId = memberId;
-  modal.style.display = 'block';
-}
+    function closeDeleteModal() {
+      const modal = document.getElementById('deleteModal');
+      modal.style.display = 'none';
+      delete modal.dataset.memberId;
+    }
 
-function closeDeleteModal() {
-  const modal = document.getElementById('deleteModal');
-  modal.style.display = 'none';
-  delete modal.dataset.memberId;
-}
-
-function confirmDelete() {
-  const modal = document.getElementById('deleteModal');
-  const memberId = modal.dataset.memberId;
-
-  if (memberId) {
-    FlutterChannel.postMessage(JSON.stringify({
-      type: 'deleteMember',
-      payload: { id: memberId }
-    }));
-  }
-
-  closeDeleteModal();
-  closeModal(); // also close the info modal
-}
+    function confirmDelete() {
+      const modal = document.getElementById('deleteModal');
+      const memberId = modal.dataset.memberId;
+      if (memberId) {
+        FlutterChannel.postMessage(JSON.stringify({ type: 'deleteMember', payload: { id: memberId } }));
+      }
+      closeDeleteModal();
+      closeModal();
+    }
 
     function renderFamilyTree(data) {
       allMembers = data.filter(el => el.data && el.group === 'nodes');
-
       const cy = cytoscape({
         container: document.getElementById('cy'),
         elements: data,

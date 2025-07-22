@@ -80,18 +80,22 @@ class _LoginScreenState extends State<LoginScreen> {
         FirebaseMessaging messaging = FirebaseMessaging.instance;
         String? token = await messaging.getToken();
 
-        if (token != null) {
-          await FirebaseFirestore.instance
-              .collection('families')
-              .doc(familyID) // You should already have the correct familyID
-              .collection(_userType == 'Moderator' ? 'moderators' : 'family_members')
-              .doc(user.uid)
-              .update({
-            'fcmToken': token,
-          });
-        }
-      }
+        // Update both FCM token and last login timestamp
+        Map<String, dynamic> updateData = {
+          'lastLogin': FieldValue.serverTimestamp(), // Add this line
+        };
 
+        if (token != null) {
+          updateData['fcmToken'] = token;
+        }
+
+        await FirebaseFirestore.instance
+            .collection('families')
+            .doc(familyID)
+            .collection(_userType == 'Moderator' ? 'moderators' : 'family_members')
+            .doc(user.uid)
+            .update(updateData);
+      }
 
       if (!doc.exists) {
         setState(() => _errorMessage = "No $_userType account found in this Family ID.");

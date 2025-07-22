@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'dart:io';
+import 'dart:async';
 import 'package:image_picker/image_picker.dart';
 import 'package:firebase_storage/firebase_storage.dart';
 
@@ -27,10 +28,41 @@ class _ModeratorProfilePageState extends State<ModeratorProfilePage> {
   String? _imageUrl;
   String email = '';
 
+  TextEditingController _searchController = TextEditingController();
+  String _searchQuery = '';
+
+  @override
+  void dispose() {
+    _searchController.dispose();
+    _invitationSubscription?.cancel();
+    super.dispose();
+  }
+
   @override
   void initState() {
     super.initState();
     _loadModeratorData();
+    _setupInvitationListener();
+  }
+
+  StreamSubscription? _invitationSubscription;
+
+  void _setupInvitationListener() {
+    final uid = _auth.currentUser?.uid;
+    if (uid != null) {
+      _invitationSubscription = _firestore
+          .collection('families')
+          .doc(widget.familyId)
+          .collection('moderators')
+          .doc(uid)
+          .snapshots()
+          .listen((doc) {
+        if (doc.exists && doc.data()?['invitationStatus'] == 'accepted') {
+          // Refresh UI if invitation was accepted
+          setState(() {});
+        }
+      });
+    }
   }
 
   Future<void> _loadModeratorData() async {
@@ -81,7 +113,7 @@ class _ModeratorProfilePageState extends State<ModeratorProfilePage> {
 
     final storageRef = FirebaseStorage.instance
         .ref()
-        .child('moderators/$uid/profile.jpg');
+        .child('moderators/${widget.familyId}/$uid/profile.jpg');
 
     await storageRef.putFile(file);
     final downloadUrl = await storageRef.getDownloadURL();
@@ -211,6 +243,112 @@ class _ModeratorProfilePageState extends State<ModeratorProfilePage> {
     );
   }
 
+  Future<void> _handleInvitationResponse(String memberId, bool accepted) async {
+    final familyRef = _firestore.collection('families').doc(widget.familyId);
+
+    try {
+      // Update the moderators collection
+      await familyRef
+          .collection('moderators')
+          .doc(memberId)
+          .update({
+        'invitationStatus': accepted ? 'accepted' : 'rejected',
+        'isModerator': accepted,
+        'respondedAt': FieldValue.serverTimestamp(),
+      });
+
+      // Also update the family_members collection
+      await familyRef
+          .collection('family_members')
+          .doc(memberId)
+          .update({
+        'isModerator': accepted,
+      });
+
+      setState(() {});
+    } catch (e) {
+      print("Error updating invitation status: $e");
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text("Failed to update status.")),
+      );
+    }
+  }
+
+  Future<List<Map<String, dynamic>>> _getFamilyMembers() async {
+    final snapshot = await _firestore
+        .collection('families')
+        .doc(widget.familyId)
+        .collection('family_members')
+        .get();
+
+    final allMembers = snapshot.docs.map((doc) {
+      final data = doc.data();
+
+      return {
+        'id': doc.id,
+        'fullName': data['fullName'] ?? '',
+        'nickname': data['nickname'] ?? '',
+        'isModerator': data['isModerator'] ?? false,
+        'invitedToBeModerator': data['invitedToBeModerator'] ?? false,
+        'profileImageUrl': data['profileImageUrl'], // optional
+      };
+    }).toList();
+
+    if (_searchQuery.isEmpty) return allMembers;
+
+    return allMembers.where((member) {
+      final fullName = member['fullName'].toLowerCase();
+      final nickname = member['nickname'].toLowerCase();
+      final search = _searchQuery.toLowerCase();
+      return fullName.contains(search) || nickname.contains(search);
+    }).toList();
+  }
+
+  Future<void> _assignAsModerator(String memberId) async {
+    final familyRef = _firestore.collection('families').doc(widget.familyId);
+
+    try {
+      // Update the family_members record
+      await familyRef
+          .collection('family_members')
+          .doc(memberId)
+          .update({
+        'invitedToBeModerator': true,
+        'isModerator': false, // Set to false initially until accepted
+      });
+
+      // Get the full data of the member
+      DocumentSnapshot memberDoc = await familyRef
+          .collection('family_members')
+          .doc(memberId)
+          .get();
+
+      // Save to moderators collection with invitation status
+      if (memberDoc.exists) {
+        await familyRef
+            .collection('moderators')
+            .doc(memberId)
+            .set({
+          ...memberDoc.data() as Map<String, dynamic>,
+          'invitationStatus': 'pending',
+          'invitedAt': FieldValue.serverTimestamp(),
+          'isModerator': false,
+        });
+      }
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text("Moderator invite sent!")),
+      );
+
+      setState(() {}); // Refresh the UI
+    } catch (e) {
+      print("Error assigning moderator: $e");
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text("Failed to assign moderator.")),
+      );
+    }
+  }
+
   void _deleteAccount() async {
     final confirm = await showDialog<bool>(
       context: context,
@@ -261,6 +399,18 @@ class _ModeratorProfilePageState extends State<ModeratorProfilePage> {
       trailing: Icon(Icons.arrow_forward_ios),
       onTap: onTap,
     );
+  }
+
+  Widget _buildInvitationStatus(String? status) {
+    switch (status) {
+      case 'accepted':
+        return Text("Accepted", style: TextStyle(color: Colors.green));
+      case 'rejected':
+        return Text("Rejected", style: TextStyle(color: Colors.red));
+      case 'pending':
+      default:
+        return Text("Pending", style: TextStyle(color: Colors.orange));
+    }
   }
 
   @override
@@ -346,6 +496,83 @@ class _ModeratorProfilePageState extends State<ModeratorProfilePage> {
                 onPressed: _deleteAccount,
                 child: Text('Delete Account', style: TextStyle(color: Colors.red)),
               ),
+            ),
+            SizedBox(height: 20),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: Text('Assign New Moderator',
+                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+            ),
+            Divider(),
+
+            TextField(
+              controller: _searchController,
+              decoration: InputDecoration(
+                labelText: 'Search by full name or nickname',
+                prefixIcon: Icon(Icons.search),
+                border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+              ),
+              onChanged: (value) {
+                setState(() {
+                  _searchQuery = value.trim();
+                });
+              },
+            ),
+            SizedBox(height: 10),
+
+            FutureBuilder<List<Map<String, dynamic>>>(
+              future: _getFamilyMembers(),
+              builder: (context, snapshot) {
+                if (snapshot.connectionState == ConnectionState.waiting) {
+                  return Center(child: CircularProgressIndicator());
+                }
+
+                if (!snapshot.hasData || snapshot.data!.isEmpty) {
+                  return Text("No matching family members found.");
+                }
+
+                final members = snapshot.data!;
+
+                return Column(
+                  children: members.map((member) {
+                    final alreadyInvited = member['invitedToBeModerator'] == true;
+                    final isAlreadyMod = member['isModerator'] == true;
+                    final imageUrl = member['profileImageUrl'];
+
+                    return ListTile(
+                      leading: CircleAvatar(
+                        backgroundImage: imageUrl != null ? NetworkImage(imageUrl) : null,
+                        child: imageUrl == null ? Icon(Icons.person) : null,
+                      ),
+                      title: Text(member['fullName']),
+                      subtitle: Text(member['nickname']),
+                      // In your ListTile builder, modify the trailing widget:
+                      trailing: isAlreadyMod
+                          ? Text("Moderator", style: TextStyle(color: Colors.green))
+                          : alreadyInvited
+                          ? member['invitationStatus'] == 'pending'
+                          ? Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          IconButton(
+                            icon: Icon(Icons.check, color: Colors.green),
+                            onPressed: () => _handleInvitationResponse(member['id'], true),
+                          ),
+                          IconButton(
+                            icon: Icon(Icons.close, color: Colors.red),
+                            onPressed: () => _handleInvitationResponse(member['id'], false),
+                          ),
+                        ],
+                      )
+                          : _buildInvitationStatus(member['invitationStatus'])
+                          : ElevatedButton(
+                        onPressed: () => _assignAsModerator(member['id']),
+                        child: Text("Invite as Moderator"),
+                      ),
+                    );
+                  }).toList(),
+                );
+              },
             ),
           ],
         ),

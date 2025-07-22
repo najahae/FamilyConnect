@@ -1,6 +1,6 @@
-// 1. New screen for Moderator to edit parent info
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:dropdown_search/dropdown_search.dart';
 
 class EditMembersPage extends StatefulWidget {
   final String familyId;
@@ -94,54 +94,72 @@ class _EditMembersPageState extends State<EditMembersPage> {
           borderRadius: BorderRadius.vertical(bottom: Radius.circular(20)),
         ),
       ),
-      backgroundColor: Colors.grey[100],
-      body: isLoading
-          ? const Center(child: CircularProgressIndicator())
-          : allMembers.isEmpty
-          ? const Center(child: Text('No family members found.'))
-          : Column(
-        children: [
-          buildFilterBar(),
-          Expanded(
-            child: ListView.builder(
-              padding: const EdgeInsets.all(12),
-              itemCount: filteredMembers.length,
-              itemBuilder: (context, index) {
-                final member = filteredMembers[index];
-                return Card(
-                  shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(12)),
-                  elevation: 3,
-                  margin: const EdgeInsets.symmetric(vertical: 6),
-                  child: ListTile(
-                    contentPadding: const EdgeInsets.symmetric(
-                        horizontal: 16, vertical: 10),
-                    title: Text(
-                      member['fullName'] ?? 'Unnamed',
-                      style: const TextStyle(
-                          fontWeight: FontWeight.bold),
+      body: Container(
+        color: Colors.grey[100], // Set background color here
+        child: isLoading
+            ? const Center(child: CircularProgressIndicator())
+            : allMembers.isEmpty
+            ? const Center(child: Text('No family members found.'))
+            : Column(
+          children: [
+            buildFilterBar(),
+            Expanded(
+              child: ListView.builder(
+                padding: const EdgeInsets.all(12),
+                itemCount: filteredMembers.length,
+                itemBuilder: (context, index) {
+                  final member = filteredMembers[index];
+                  return Card(
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
                     ),
-                    subtitle: Text(
-                        'Nickname: ${member['nickname'] ?? '-'}'),
-                    trailing: IconButton(
-                      icon: const Icon(Icons.edit,
-                          color: Colors.blueGrey),
-                      onPressed: () {
-                        showDialog(
-                          context: context,
-                          builder: (_) => EditParentsDialog(
-                            member: member,
-                            allMembers: allMembers,
-                          ),
-                        );
-                      },
+                    elevation: 3,
+                    margin: const EdgeInsets.symmetric(vertical: 6),
+                    child: ListTile(
+                      contentPadding: const EdgeInsets.symmetric(
+                        horizontal: 16, vertical: 10,
+                      ),
+                      title: Text(
+                        member['fullName'] ?? 'Unnamed',
+                        style: const TextStyle(
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                      subtitle: Text(
+                        'Nickname: ${member['nickname'] ?? '-'}',
+                      ),
+                      trailing: IconButton(
+                        icon: const Icon(Icons.edit,
+                            color: Colors.blueGrey),
+                        onPressed: () async {
+                          final success = await showDialog<bool>(
+                            context: context,
+                            builder: (_) => EditParentsDialog(
+                              member: member,
+                              allMembers: allMembers,
+                              familyId: widget.familyId, // pass it here
+                            ),
+                          );
+                          if (success == true) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(
+                                content: Text(
+                                  'Parents updated successfully!',
+                                ),
+                                duration: Duration(seconds: 2),
+                              ),
+                            );
+                            fetchMembers();
+                          }
+                        },
+                      ),
                     ),
-                  ),
-                );
-              },
+                  );
+                },
+              ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }
@@ -150,9 +168,14 @@ class _EditMembersPageState extends State<EditMembersPage> {
 class EditParentsDialog extends StatefulWidget {
   final DocumentSnapshot member;
   final List<DocumentSnapshot> allMembers;
+  final String familyId;
 
-  const EditParentsDialog(
-      {super.key, required this.member, required this.allMembers});
+  const EditParentsDialog({
+    Key? key,
+    required this.member,
+    required this.allMembers,
+    required this.familyId,
+  }) : super(key: key);
 
   @override
   State<EditParentsDialog> createState() => _EditParentsDialogState();
@@ -161,6 +184,7 @@ class EditParentsDialog extends StatefulWidget {
 class _EditParentsDialogState extends State<EditParentsDialog> {
   String? selectedFatherId;
   String? selectedMotherId;
+  bool _isSaving = false;
 
   @override
   void initState() {
@@ -169,102 +193,166 @@ class _EditParentsDialogState extends State<EditParentsDialog> {
     selectedMotherId = widget.member['motherId'];
   }
 
+  Future<void> _saveParents() async {
+    setState(() => _isSaving = true);
+    try {
+      await FirebaseFirestore.instance
+          .collection('families')
+          .doc(widget.familyId)
+          .collection('family_members')
+          .doc(widget.member.id)
+          .update({
+        'fatherId': selectedFatherId,
+        'motherId': selectedMotherId,
+      });
+      Navigator.of(context).pop(true); // Return success
+    } catch (e) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Failed to save: ${e.toString()}')),
+      );
+    } finally {
+      setState(() => _isSaving = false);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
-    List<DropdownMenuItem<String>> fatherOptions = widget.allMembers
-        .where((m) =>
+    // Convert DocumentSnapshots to a format DropdownSearch can use
+    final potentialFathers = widget.allMembers.where((m) =>
     m.id != widget.member.id &&
-        (m['gender'] ?? '').toString().toLowerCase() == 'male')
-        .map((m) => DropdownMenuItem(
-      value: m.id,
-      child: Text(m['fullName'] ?? m.id),
-    ))
-        .toList();
+        (m['gender'] ?? '').toString().toLowerCase() == 'male').toList();
 
-    List<DropdownMenuItem<String>> motherOptions = widget.allMembers
-        .where((m) =>
+    final potentialMothers = widget.allMembers.where((m) =>
     m.id != widget.member.id &&
-        (m['gender'] ?? '').toString().toLowerCase() == 'female')
-        .map((m) => DropdownMenuItem(
-      value: m.id,
-      child: Text(m['fullName'] ?? m.id),
-    ))
-        .toList();
+        (m['gender'] ?? '').toString().toLowerCase() == 'female').toList();
+
+    // Create a "None" option
+    final noneOption = {'id': null, 'name': 'None'};
 
     return Dialog(
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-      insetPadding: const EdgeInsets.all(20),
       child: Padding(
         padding: const EdgeInsets.all(20),
-        child: SingleChildScrollView(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text(
-                'Edit Parents of\n${widget.member['fullName'] ?? 'Unnamed'}',
-                style:
-                const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-                textAlign: TextAlign.center,
-              ),
-              const SizedBox(height: 16),
-              DropdownButtonFormField<String>(
-                value: selectedFatherId,
-                decoration: InputDecoration(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              'Edit Parents for ${widget.member['fullName'] ?? 'Member'}',
+              style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 20),
+
+            // Father Dropdown
+            DropdownSearch<Map<String, dynamic>>(
+              items: [noneOption, ...potentialFathers.map((doc) => {
+                'id': doc.id,
+                'name': doc['fullName'] ?? 'Unnamed',
+                'doc': doc,
+              })],
+              selectedItem: potentialFathers
+                  .where((m) => m.id == selectedFatherId)
+                  .map((doc) => {
+                'id': doc.id,
+                'name': doc['fullName'] ?? 'Unnamed',
+                'doc': doc,
+              })
+                  .firstOrNull ?? noneOption,
+              itemAsString: (item) => item['name'],
+              onChanged: (value) {
+                setState(() {
+                  selectedFatherId = value?['id'];
+                });
+              },
+              dropdownDecoratorProps: const DropDownDecoratorProps(
+                dropdownSearchDecoration: InputDecoration(
                   labelText: 'Father',
-                  border:
-                  OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
-                  contentPadding:
-                  const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                  border: OutlineInputBorder(),
                 ),
-                items: fatherOptions,
-                onChanged: (val) => setState(() => selectedFatherId = val),
               ),
-              const SizedBox(height: 12),
-              DropdownButtonFormField<String>(
-                value: selectedMotherId,
-                decoration: InputDecoration(
+              popupProps: PopupProps.menu(
+                showSearchBox: true,
+                itemBuilder: (context, item, isSelected) {
+                  return ListTile(
+                    title: Text(item['name']),
+                  );
+                },
+                searchFieldProps: const TextFieldProps(
+                  decoration: InputDecoration(
+                    hintText: 'Search fathers...',
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+              ),
+            ),
+
+            const SizedBox(height: 16),
+
+            // Mother Dropdown
+            DropdownSearch<Map<String, dynamic>>(
+              items: [noneOption, ...potentialMothers.map((doc) => {
+                'id': doc.id,
+                'name': doc['fullName'] ?? 'Unnamed',
+                'doc': doc,
+              })],
+              selectedItem: potentialMothers
+                  .where((m) => m.id == selectedMotherId)
+                  .map((doc) => {
+                'id': doc.id,
+                'name': doc['fullName'] ?? 'Unnamed',
+                'doc': doc,
+              })
+                  .firstOrNull ?? noneOption,
+              itemAsString: (item) => item['name'],
+              onChanged: (value) {
+                setState(() {
+                  selectedMotherId = value?['id'];
+                });
+              },
+              dropdownDecoratorProps: const DropDownDecoratorProps(
+                dropdownSearchDecoration: InputDecoration(
                   labelText: 'Mother',
-                  border:
-                  OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
-                  contentPadding:
-                  const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                  border: OutlineInputBorder(),
                 ),
-                items: motherOptions,
-                onChanged: (val) => setState(() => selectedMotherId = val),
               ),
-              const SizedBox(height: 20),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  TextButton(
-                    onPressed: () => Navigator.pop(context),
-                    child: const Text('Cancel'),
+              popupProps: PopupProps.menu(
+                showSearchBox: true,
+                itemBuilder: (context, item, isSelected) {
+                  return ListTile(
+                    title: Text(item['name']),
+                  );
+                },
+                searchFieldProps: const TextFieldProps(
+                  decoration: InputDecoration(
+                    hintText: 'Search mothers...',
+                    border: OutlineInputBorder(),
                   ),
-                  ElevatedButton(
-                    onPressed: () async {
-                      await FirebaseFirestore.instance
-                          .collection('families')
-                          .doc(widget.member['familyId'])
-                          .collection('family_members')
-                          .doc(widget.member.id)
-                          .update({
-                        'fatherId': selectedFatherId,
-                        'motherId': selectedMotherId,
-                      });
-                      Navigator.pop(context);
-                    },
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: Colors.green[400],
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(8),
-                      ),
-                    ),
-                    child: const Text('Save'),
-                  ),
-                ],
-              )
-            ],
-          ),
+                ),
+              ),
+            ),
+
+            const SizedBox(height: 20),
+
+            Row(
+              mainAxisAlignment: MainAxisAlignment.end,
+              children: [
+                TextButton(
+                  onPressed: () => Navigator.pop(context),
+                  child: const Text('Cancel'),
+                ),
+                const SizedBox(width: 8),
+                ElevatedButton(
+                  onPressed: _isSaving ? null : _saveParents,
+                  child: _isSaving
+                      ? const SizedBox(
+                    width: 20,
+                    height: 20,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                      : const Text('Save'),
+                ),
+              ],
+            ),
+          ],
         ),
       ),
     );

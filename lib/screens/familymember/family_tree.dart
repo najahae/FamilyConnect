@@ -1,4 +1,6 @@
 import 'dart:convert';
+import 'dart:math';
+import 'package:familytree/screens/familymember/family_members_list.dart';
 import 'package:familytree/screens/moderator/edit_members.dart';
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -18,11 +20,12 @@ class FamilyTreePage extends StatefulWidget {
 class _FamilyTreePageState extends State<FamilyTreePage> {
   late final WebViewController _controller;
   List<FamilyMember> members = [];
+  String selectedGeneration = 'All';
+  List<String> generationOptions = ['All', '1st Gen', '2nd Gen', '3rd Gen', '4th Gen+', 'In-Laws/Unknown'];
   bool isLoading = true;
 
   // Filters
   String searchTerm = '';
-  String selectedGender = 'All';
 
   @override
   void initState() {
@@ -97,8 +100,10 @@ class _FamilyTreePageState extends State<FamilyTreePage> {
     final filtered = members.where((m) {
       final matchesSearch = m.fullName.toLowerCase().contains(searchTerm) ||
           (m.nickname?.toLowerCase().contains(searchTerm) ?? false);
-      final matchesGender = selectedGender == 'All' || m.gender.toLowerCase() == selectedGender.toLowerCase();
-      return matchesSearch && matchesGender;
+      final matchesGeneration = selectedGeneration == 'All' ||
+          _matchesGenerationFilter(m, selectedGeneration);
+
+      return matchesSearch && matchesGeneration;
     }).toList();
 
     final elements = toCytoscapeElements(filtered);
@@ -121,45 +126,83 @@ class _FamilyTreePageState extends State<FamilyTreePage> {
     final elements = <Map<String, dynamic>>[];
     final memberMap = {for (var m in members) m.id: m};
 
+    // Expanded color palette
+    final colors = [
+      '#4a90e2', '#f06292', '#66bb6a', '#ffa726', '#26c6da',
+      '#ab47bc', '#ec407a', '#d4e157', '#5c6bc0', '#ef5350',
+      '#8d6e63', '#78909c', '#ff7043', '#26a69a', '#ffee58',
+      '#7e57c2', '#42a5f5', '#9ccc65', '#ffca28', '#5d4037',
+      '#00897b', '#f4511e', '#6d4c41', '#3949ab', '#c2185b',
+      '#e91e63', '#00acc1', '#7cb342', '#fb8c00', '#5e35b1'
+    ];
+
+    final familyColors = <String, String>{};
+
+    // First pass - assign colors to root members
     for (var member in members) {
-      elements.add({
+      if (member.fatherId == null && member.motherId == null) {
+        if (!familyColors.containsKey(member.id)) {
+          final colorIndex = member.id.hashCode.abs() % colors.length;
+          familyColors[member.id] = colors[colorIndex];
+        }
+      }
+    }
+
+    // Second pass - assign colors and shapes
+    for (var member in members) {
+      String color;
+
+      if (member.fatherId != null && familyColors.containsKey(member.fatherId)) {
+        color = familyColors[member.fatherId]!;
+      }
+      else if (member.motherId != null && familyColors.containsKey(member.motherId)) {
+        color = familyColors[member.motherId]!;
+      }
+      else {
+        final colorIndex = member.id.hashCode.abs() % colors.length;
+        color = colors[colorIndex];
+        familyColors[member.id] = color;
+      }
+
+      // Add gender-specific properties
+      final gender = member.gender?.toLowerCase() ?? '';
+      final shape = gender == 'male' ? 'rectangle' :
+      gender == 'female' ? 'ellipse' : 'hexagon';
+
+      final elementData = {
         'data': {
           'id': member.id,
           'label': getInitials(member.fullName),
           'fullName': member.fullName,
           'nickname': member.nickname ?? '',
           'birthDate': member.birthDate ?? '',
-          'color': member.gender.toLowerCase() == 'male'
-              ? '#4a90e2'
-              : '#f06292',
-        }
-      });
+          'color': color,
+          'gender': gender,
+          'profileImageUrl': member.profileImageUrl ?? '',
+        },
+        // Add gender-specific styling
+        'classes': gender // This will allow CSS class targeting in Cytoscape
+      };
+
+      elements.add(elementData);
     }
 
+    // Relationship creation
     for (var member in members) {
       if (member.fatherId != null && memberMap.containsKey(member.fatherId)) {
         elements.add({
-          'data': {
-            'source': member.fatherId,
-            'target': member.id,
-          }
+          'data': {'source': member.fatherId, 'target': member.id}
         });
       }
       if (member.motherId != null && memberMap.containsKey(member.motherId)) {
         elements.add({
-          'data': {
-            'source': member.motherId,
-            'target': member.id,
-          }
+          'data': {'source': member.motherId, 'target': member.id}
         });
       }
       if (member.spouseId != null && memberMap.containsKey(member.spouseId)) {
-        if (!elements.any((e) =>
-        e['data']?['relationship'] == 'spouse' &&
-            ((e['data']?['source'] == member.id &&
-                e['data']?['target'] == member.spouseId) ||
-                (e['data']?['source'] == member.spouseId &&
-                    e['data']?['target'] == member.id)))) {
+        if (!elements.any((e) => e['data']?['relationship'] == 'spouse' &&
+            ((e['data']?['source'] == member.id && e['data']?['target'] == member.spouseId) ||
+                (e['data']?['source'] == member.spouseId && e['data']?['target'] == member.id)))) {
           elements.add({
             'data': {
               'source': member.id,
@@ -172,6 +215,104 @@ class _FamilyTreePageState extends State<FamilyTreePage> {
     }
 
     return elements;
+  }
+
+  void _showTreeInfoDialog() {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text("Family Tree Guide"),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: const [
+            Text("Arrows (→): Parent → Child"),
+            SizedBox(height: 8),
+            Text("Dotted Line (---): Spouse connection"),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text("Got it!"),
+          ),
+        ],
+      ),
+    );
+  }
+
+  int _calculateGeneration(FamilyMember member, {int depth = 0, Set<String>? visited}) {
+    visited ??= <String>{};
+
+    // Prevent infinite loops in case of circular references
+    if (visited.contains(member.id)) return 1;
+    visited.add(member.id);
+
+    // Case 1: In-laws (spouses with no parents)
+    if (member.fatherId == null && member.motherId == null) {
+      // Check if they're connected as spouses
+      try {
+        final spouse = members.firstWhere(
+              (m) => m.spouseId == member.id || member.spouseId == m.id,
+        );
+        // Inherit generation from spouse
+        return _calculateGeneration(spouse, visited: visited);
+      } catch (e) {
+        // No spouse found
+      }
+    }
+
+    // Case 2: Regular members with parents
+    if (member.fatherId != null || member.motherId != null) {
+      FamilyMember? father;
+      FamilyMember? mother;
+
+      try {
+        father = member.fatherId != null
+            ? members.firstWhere((m) => m.id == member.fatherId)
+            : null;
+      } catch (e) {
+        father = null;
+      }
+
+      try {
+        mother = member.motherId != null
+            ? members.firstWhere((m) => m.id == member.motherId)
+            : null;
+      } catch (e) {
+        mother = null;
+      }
+
+      int fatherGen = father != null ? _calculateGeneration(father, visited: visited) : 0;
+      int motherGen = mother != null ? _calculateGeneration(mother, visited: visited) : 0;
+
+      return max(fatherGen, motherGen) + 1;
+    }
+
+    // Case 3: Root members (no parents and not spouses)
+    return 1;
+  }
+
+  bool _matchesGenerationFilter(FamilyMember member, String selectedGen) {
+    final generation = _calculateGeneration(member);
+
+    switch (selectedGen) {
+      case '1st Gen':
+        return generation == 1;
+      case '2nd Gen':
+        return generation == 2;
+      case '3rd Gen':
+        return generation == 3;
+      case '4th Gen+':
+        return generation >= 4;
+      case 'In-Laws/Unknown':
+      // Members with no parents and no generational connection
+        return member.fatherId == null &&
+            member.motherId == null &&
+            members.none((m) => m.spouseId == member.id || member.spouseId == m.id);
+      default:
+        return true;
+    }
   }
 
   @override
@@ -193,20 +334,54 @@ class _FamilyTreePageState extends State<FamilyTreePage> {
           ),
         ),
       ),
-      floatingActionButton: (widget.role == 'moderator')
-          ? FloatingActionButton(
-        onPressed: () {
-          Navigator.push(
-            context,
-            MaterialPageRoute(
-              builder: (context) => EditMembersPage(familyId: widget.familyID),
-            ),
-          );
-        },
-        child: const Icon(Icons.list),
-        tooltip: 'Edit Members',
-      )
-          : null,
+        floatingActionButton: FloatingActionButton(
+          onPressed: () {
+            showModalBottomSheet(
+              context: context,
+              shape: const RoundedRectangleBorder(
+                borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+              ),
+              builder: (context) {
+                return SafeArea(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      ListTile(
+                        leading: const Icon(Icons.list),
+                        title: const Text('View Member List'),
+                        onTap: () {
+                          Navigator.pop(context); // Close the bottom sheet
+                          Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                              builder: (context) => FamilyMemberListPage(familyId: widget.familyID),
+                            ),
+                          );
+                        },
+                      ),
+                      if (widget.role == 'moderator')
+                        ListTile(
+                          leading: const Icon(Icons.edit),
+                          title: const Text('Edit Parents'),
+                          onTap: () {
+                            Navigator.pop(context);
+                            Navigator.push(
+                              context,
+                              MaterialPageRoute(
+                                builder: (context) => EditMembersPage(familyId: widget.familyID),
+                              ),
+                            );
+                          },
+                        ),
+                    ],
+                  ),
+                );
+              },
+            );
+          },
+          child: const Icon(Icons.menu),
+          tooltip: 'Options',
+        ),
       body: isLoading
           ? const Center(child: CircularProgressIndicator())
           : Column(
@@ -214,6 +389,7 @@ class _FamilyTreePageState extends State<FamilyTreePage> {
           Padding(
             padding: const EdgeInsets.fromLTRB(12, 10, 12, 0),
             child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 TextField(
                   onChanged: (val) {
@@ -229,20 +405,35 @@ class _FamilyTreePageState extends State<FamilyTreePage> {
                 const SizedBox(height: 10),
                 Row(
                   children: [
-                    const Text('Gender:'),
+                    const Text('Generation:'),
                     const SizedBox(width: 10),
                     DropdownButton<String>(
-                      value: selectedGender,
+                      value: selectedGeneration,
                       onChanged: (val) {
-                        setState(() => selectedGender = val ?? 'All');
+                        setState(() => selectedGeneration = val ?? 'All');
                         sendFamilyTreeData();
                       },
-                      items: ['All', 'Male', 'Female'].map((gender) {
-                        return DropdownMenuItem(value: gender, child: Text(gender));
+                      items: generationOptions.map((gen) {
+                        return DropdownMenuItem(
+                          value: gen,
+                          child: Text(gen),
+                        );
                       }).toList(),
                     ),
                   ],
-                )
+                ),
+                const SizedBox(height: 10),
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: TextButton.icon(
+                    onPressed: _showTreeInfoDialog,
+                    icon: Icon(Icons.info_outline, color: Colors.brown),
+                    label: Text(
+                      "What does arrow and dotted line mean?",
+                      style: TextStyle(color: Colors.brown),
+                    ),
+                  ),
+                ),
               ],
             ),
           ),
@@ -252,4 +443,8 @@ class _FamilyTreePageState extends State<FamilyTreePage> {
       ),
     );
   }
+}
+
+extension IterableExtension<T> on Iterable<T> {
+  bool none(bool Function(T) test) => !any(test);
 }
